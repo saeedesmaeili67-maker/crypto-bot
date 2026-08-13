@@ -1,1047 +1,742 @@
+# -*- coding: utf-8 -*-
 """
-ربات جامع تحلیل ارز دیجیتال + رصد نهنگ + اطلاع‌رسانی تلگرام
-================================================================
-این نسخه یه ربات کامل و همیشه-روشن هست که:
+RESOLV / UNIVERSAL SPOT ANALYZER - FINAL VISUAL VERSION
+---------------------------------------------------------
+Input:
+  Coin symbol, capital in USD, optional desired entry price.
 
-  1. با فرستادن دستور توی تلگرام، تحلیل تکنیکال کامل (RSI, MACD, حجم,
-     حمایت/مقاومت, سیگنال خرید/فروش) رو همراه با نمودار برات می‌فرسته.
-     اول دنبال نماد توی بایننس می‌گرده، اگه نبود خودکار میره سراغ بیت‌گت
-     (برای ارزهای کوچیک‌تر که روی بایننس نیستن، مثل VELVET)
-  2. یه موتور تصمیم‌گیری چند-عاملی داره: تکنیکال + ساختار بازار (HH/HL/LH/LL,
-     BOS) + حجم/واگرایی + نهنگ تقریبی + ریسک، همه مستقل امتیاز میدن.
-     بعد یه Counter-Signal Engine مستقل دنبال دلایل نخریدن می‌گرده.
-     نتیجه نهایی: BUY / WAIT / NO TRADE با Entry/SL/TP1-3، دلایل موافق/مخالف،
-     سناریوهای صعودی/خنثی/نزولی، و مقایسه با الگوهای مشابه گذشته همون ارز.
-     (⚠️ همه این‌ها فقط بر پایه قیمت/حجم رایگانه، نه دیتای آنچین یا فاندامنتال پولی)
-  3. معاملات درشت (نهنگ) روی بایننس رو لحظه‌ای رصد می‌کنه و به محض
-     دیدن یه معامله بزرگ، فوری بهت پیام تلگرام میده
-     (رصد نهنگ فقط روی بایننسه، بیت‌گت هنوز پشتیبانی نمیشه)
-  4. هر مدت مشخص (پیش‌فرض هر ۶۰ دقیقه) خودش خودکار نمادهای تحت رصد رو
-     چک می‌کنه و اگه سیگنال قوی خرید/فروش دید، بهت خبر میده
-  5. با /scan کل لیست رصدت رو اسکن و رتبه‌بندی می‌کنه
+Analysis:
+  15m + 30m + 4H + 1D
+  BTC 4H + 1D filter
+  EMA20/50/200, RSI, ATR, Volume, Support/Resistance,
+  Market Structure, Trendlines, Breakout.
 
-⚠️ نکته مهم: این ربات باید ۲۴ ساعته روشن بمونه تا کارش رو درست انجام بده.
-روی گوشی یا Replit رایگان مناسب نیست (چون با بستن صفحه متوقف میشه).
-پیشنهاد: یه VPS ارزون (ماهی ۵-۱۰ دلار) یا Railway/Render با پلن Always-On.
+Output:
+  A professional PNG similar to the supplied sample:
+  candles + levels + trendlines + Entry/SL/TP + RSI + Volume
+  + timeframe scores + BTC filter + P/L table + trade plan.
 
-—————————————————————————————————————————————————————————————
-راه‌اندازی:
-—————————————————————————————————————————————————————————————
-۱) نصب پیش‌نیازها:
-    pip install ccxt pandas numpy mplfinance requests websocket-client
-
-۲) ساخت بات تلگرام:
-    - توی تلگرام برو سراغ @BotFather
-    - بزن /newbot و اسم دلخواه بده
-    - یه توکن بهت میده شبیه این: 123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    - اون توکن رو بذار توی متغیر TELEGRAM_BOT_TOKEN پایین همین فایل
-
-۳) اجرا:
-    python pro_crypto_bot.py
-
-۴) توی تلگرام برو سراغ باتی که ساختی و بزن /start
-   (این کار باعث میشه ربات chat_id تو رو یاد بگیره و ازین به بعد بتونه پیام بده)
-
-۵) دستورات قابل استفاده توی تلگرام:
-    /start              فعال‌سازی و دیدن راهنما
-    /analyze BTC/USDT   تحلیل کامل + نمودار + تصمیم BUY/WAIT/NO TRADE
-    /scan               رتبه‌بندی نمادهای تحت رصد
-    /watch SOLUSDT      اضافه کردن نماد به رصد نهنگ (بدون اسلش، حروف بزرگ)
-    /unwatch SOLUSDT    حذف نماد از رصد نهنگ
-    /watchlist          نمایش نمادهای تحت رصد
-    /whales_on          روشن کردن هشدار نهنگ
-    /whales_off         خاموش کردن هشدار نهنگ
-    /help               راهنما
+Install:
+  pip install requests pandas numpy matplotlib
+Optional for Persian labels:
+  pip install arabic-reshaper python-bidi
 """
 
 import os
-import sys
-import json
-import time
-import threading
-from datetime import datetime
-
+import math
 import requests
-import ccxt
 import numpy as np
 import pandas as pd
-import mplfinance as mpf
-import websocket  # از پکیج websocket-client
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.ticker import FuncFormatter
 
+# ------------------------------------------------------------
+# Optional Persian text support
+# ------------------------------------------------------------
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
 
-# ===========================================================================
-# تنظیمات — این بخش رو خودت پر کن
-# ===========================================================================
+    def fa(text):
+        return get_display(arabic_reshaper.reshape(str(text)))
+except Exception:
+    def fa(text):
+        return str(text)
 
-TELEGRAM_BOT_TOKEN = "8891450951:AAEqBKslx3mzxzeZUt-rW7Tv8PHXYWX8zm8"
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+BASE_URL = "https://api.binance.com/api/v3"
+FEE_RATE = 0.001  # 0.10% per side; change if your fee differs
 
-WATCHED_SYMBOLS_DEFAULT = ["BTCUSDT", "ETHUSDT"]   # نمادهای پیش‌فرض برای رصد نهنگ
-WHALE_USD_THRESHOLD = 100_000                       # حداقل ارزش دلاری یک معامله برای شمردنش به‌عنوان "نهنگ"
-AUTO_ANALYSIS_INTERVAL_MIN = 60                     # هر چند دقیقه یکبار خودکار سیگنال‌ها رو چک کنه
+TIMEFRAME_WEIGHTS = {
+    "15m": 0.15,
+    "30m": 0.20,
+    "4h": 0.30,
+    "1d": 0.35,
+}
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.json")
-OUTDIR = os.path.dirname(os.path.abspath(__file__))
+# Dark chart colors
+BG = "#080d16"
+PANEL = "#101827"
+GRID = "#263244"
+TEXT = "#f4f7fb"
+GREEN = "#18c964"
+RED = "#ff3b4d"
+BLUE = "#39a0ff"
+YELLOW = "#f4c542"
+ORANGE = "#ff9f1c"
+PURPLE = "#b36bff"
+CYAN = "#4dd9ff"
+GRAY = "#9aa6b2"
 
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-ws_thread_ref = {"current": None}
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+def normalize_symbol(symbol: str) -> str:
+    s = symbol.upper().strip().replace("/", "").replace("-", "").replace(" ", "")
+    if not s.endswith("USDT"):
+        s += "USDT"
+    return s
 
+def fmt_price(v: float) -> str:
+    if v >= 100:
+        return f"{v:,.2f}"
+    if v >= 1:
+        return f"{v:,.4f}"
+    if v >= 0.1:
+        return f"{v:.5f}"
+    if v >= 0.01:
+        return f"{v:.6f}"
+    if v >= 0.001:
+        return f"{v:.7f}"
+    return f"{v:.10f}"
 
-# ===========================================================================
-# ذخیره وضعیت (chat_id, لیست رصد, و غیره) روی دیسک تا با ری‌استارت از بین نره
-# ===========================================================================
+def pct(v: float) -> str:
+    return f"{v:+.2f}%"
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"chat_id": None, "watch": list(WATCHED_SYMBOLS_DEFAULT), "whales_enabled": True}
+# ------------------------------------------------------------
+# Binance data
+# ------------------------------------------------------------
+def get_klines(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
+    symbol = normalize_symbol(symbol)
+    r = requests.get(
+        f"{BASE_URL}/klines",
+        params={"symbol": symbol, "interval": interval, "limit": limit},
+        timeout=20,
+    )
+    r.raise_for_status()
+    raw = r.json()
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError(f"No candle data for {symbol} {interval}")
 
-
-def save_state(s):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(s, f, ensure_ascii=False, indent=2)
-
-
-state = load_state()
-state_lock = threading.Lock()
-
-
-# ===========================================================================
-# ارتباط با تلگرام
-# ===========================================================================
-
-def tg_send_message(text, chat_id=None):
-    chat_id = chat_id or state.get("chat_id")
-    if not chat_id:
-        print("[تلگرام] هنوز chat_id نداریم — اول باید /start بزنی.")
-        return
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", data={
-            "chat_id": chat_id, "text": text, "parse_mode": "HTML"
-        }, timeout=15)
-    except Exception as e:
-        print(f"[تلگرام] خطا در ارسال پیام: {e}")
-
-
-def tg_send_photo(path, caption="", chat_id=None):
-    chat_id = chat_id or state.get("chat_id")
-    if not chat_id or not os.path.exists(path):
-        return
-    try:
-        with open(path, "rb") as f:
-            requests.post(f"{TELEGRAM_API}/sendPhoto", data={
-                "chat_id": chat_id, "caption": caption
-            }, files={"photo": f}, timeout=30)
-    except Exception as e:
-        print(f"[تلگرام] خطا در ارسال عکس: {e}")
-
-
-# ===========================================================================
-# داده و اندیکاتورها (تحلیل تکنیکال)
-# ===========================================================================
-
-SUPPORTED_EXCHANGES = ["binance", "bitget"]
-
-
-def resolve_exchange(symbol):
-    """
-    پیدا کردن اولین صرافی (از بین بایننس و بیت‌گت) که این نماد رو داره.
-    برمی‌گردونه: (شیء صرافی, اسم صرافی) یا (None, None) اگه پیدا نشد
-    """
-    for ex_id in SUPPORTED_EXCHANGES:
-        try:
-            ex = getattr(ccxt, ex_id)()
-            ex.load_markets()
-            if symbol in ex.symbols:
-                return ex, ex_id
-        except Exception as e:
-            print(f"[صرافی] خطا در بررسی {ex_id}: {e}")
-            continue
-    return None, None
-
-
-def fetch_ohlcv(exchange, symbol, timeframe, limit=300):
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    cols = [
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trades",
+        "taker_buy_base", "taker_buy_quote", "ignore"
+    ]
+    df = pd.DataFrame(raw, columns=cols)
+    for c in ["open", "high", "low", "close", "volume", "quote_volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["time"] = pd.to_datetime(df["open_time"], unit="ms")
     return df
 
+# ------------------------------------------------------------
+# Indicators
+# ------------------------------------------------------------
+def ema(s, n):
+    return s.ewm(span=n, adjust=False).mean()
 
-def resample_5d(df_daily):
-    df = df_daily.set_index("timestamp")
-    df5d = df.resample("5D").agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna()
-    return df5d.reset_index()
+def rsi(s, n=14):
+    d = s.diff()
+    gain = d.clip(lower=0)
+    loss = -d.clip(upper=0)
+    ag = gain.ewm(alpha=1/n, adjust=False).mean()
+    al = loss.ewm(alpha=1/n, adjust=False).mean()
+    rs = ag / al.replace(0, np.nan)
+    return 100 - 100 / (1 + rs)
 
-
-def compute_indicators(df):
-    d = df.copy()
-    d["sma20"] = d["close"].rolling(20).mean()
-    d["sma50"] = d["close"].rolling(50).mean()
-
-    ema12 = d["close"].ewm(span=12, adjust=False).mean()
-    ema26 = d["close"].ewm(span=26, adjust=False).mean()
-    d["macd"] = ema12 - ema26
-    d["macd_signal"] = d["macd"].ewm(span=9, adjust=False).mean()
-
-    delta = d["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    d["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
-
-    d["bb_mid"] = d["close"].rolling(20).mean()
-    bb_std = d["close"].rolling(20).std()
-    d["bb_upper"] = d["bb_mid"] + 2 * bb_std
-    d["bb_lower"] = d["bb_mid"] - 2 * bb_std
-
-    d["vol_avg20"] = d["volume"].rolling(20).mean()
-    return d
-
-
-def find_pivots_chronological(df, window=3):
-    """
-    نسخه‌ای از تشخیص پیوت که ترتیب زمانی رو حفظ می‌کنه (برای تشخیص HH/HL/LH/LL لازمه،
-    چون باید بدونیم کدوم پیوت جدیدتره، نه فقط کدوم بزرگ‌تره)
-    """
-    highs, lows = [], []
-    for i in range(window, len(df) - window):
-        seg_high = df["high"].iloc[i - window:i + window + 1]
-        seg_low = df["low"].iloc[i - window:i + window + 1]
-        if df["high"].iloc[i] == seg_high.max():
-            highs.append(df["high"].iloc[i])
-        if df["low"].iloc[i] == seg_low.min():
-            lows.append(df["low"].iloc[i])
-    return highs, lows  # به ترتیب زمانی (قدیم → جدید)
-
-
-def find_pivots(df, window=5):
-    highs, lows = [], []
-    for i in range(window, len(df) - window):
-        seg_high = df["high"].iloc[i - window:i + window + 1]
-        seg_low = df["low"].iloc[i - window:i + window + 1]
-        if df["high"].iloc[i] == seg_high.max():
-            highs.append(df["high"].iloc[i])
-        if df["low"].iloc[i] == seg_low.min():
-            lows.append(df["low"].iloc[i])
-    return sorted(set(highs), reverse=True), sorted(set(lows))
-
-
-def score_row(row, prev):
-    bull, bear = 0, 0
-    rb, rs = [], []
-    if row["rsi"] < 35:
-        bull += 1; rb.append(f"RSI اشباع فروش ({row['rsi']:.0f})")
-    if row["rsi"] > 65:
-        bear += 1; rs.append(f"RSI اشباع خرید ({row['rsi']:.0f})")
-    if row["macd"] > row["macd_signal"] and prev["macd"] <= prev["macd_signal"]:
-        bull += 1; rb.append("کراس صعودی MACD")
-    if row["macd"] < row["macd_signal"] and prev["macd"] >= prev["macd_signal"]:
-        bear += 1; rs.append("کراس نزولی MACD")
-    if row["close"] <= row["bb_lower"]:
-        bull += 1; rb.append("قیمت روی باند پایین بولینگر")
-    if row["close"] >= row["bb_upper"]:
-        bear += 1; rs.append("قیمت روی باند بالای بولینگر")
-    if row["sma20"] > row["sma50"] and prev["sma20"] <= prev["sma50"]:
-        bull += 1; rb.append("کراس صعودی میانگین متحرک")
-    if row["sma20"] < row["sma50"] and prev["sma20"] >= prev["sma50"]:
-        bear += 1; rs.append("کراس نزولی میانگین متحرک")
-    if pd.notna(row["vol_avg20"]) and row["volume"] > row["vol_avg20"] * 1.5:
-        if row["close"] > prev["close"]:
-            bull += 1; rb.append("افزایش حجم همراه رشد قیمت")
-        elif row["close"] < prev["close"]:
-            bear += 1; rs.append("افزایش حجم همراه افت قیمت")
-    return bull, bear, rb, rs
-
-
-def generate_signals(df, threshold=2):
-    d = df.copy()
-    d["buy_signal"] = False
-    d["sell_signal"] = False
-    for i in range(1, len(d)):
-        bull, bear, _, _ = score_row(d.iloc[i], d.iloc[i - 1])
-        if bull >= threshold and bull > bear:
-            d.at[d.index[i], "buy_signal"] = True
-        if bear >= threshold and bear > bull:
-            d.at[d.index[i], "sell_signal"] = True
-    return d
-
-
-def plot_chart(df, symbol, timeframe_name):
-    d = df.set_index("timestamp").rename(columns={
-        "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume",
-    })
-    buy_marks = d["Low"].where(d["buy_signal"]) * 0.99
-    sell_marks = d["High"].where(d["sell_signal"]) * 1.01
-    apds = []
-    if buy_marks.notna().any():
-        apds.append(mpf.make_addplot(buy_marks, type="scatter", markersize=90, marker="^", color="green"))
-    if sell_marks.notna().any():
-        apds.append(mpf.make_addplot(sell_marks, type="scatter", markersize=90, marker="v", color="red"))
-    safe = symbol.replace("/", "_")
-    filename = os.path.join(OUTDIR, f"{safe}_{timeframe_name}.png")
-    mpf.plot(
-        d[["Open", "High", "Low", "Close", "Volume"]], type="candle", volume=True,
-        addplot=apds if apds else None, style="yahoo",
-        title=f"{symbol} - {timeframe_name}", savefig=dict(fname=filename, dpi=150, bbox_inches="tight"),
-    )
-    return filename
-
-
-def volume_report_text(df_1d):
-    lines = ["📊 <b>تحلیل حجم معاملات</b>"]
-    if len(df_1d) < 2:
-        lines.append("داده کافی نیست.")
-        return "\n".join(lines)
-    today = df_1d["volume"].iloc[-1]
-    week_avg = df_1d["volume"].tail(7).mean()
-    month_avg = df_1d["volume"].tail(30).mean()
-    lines.append(f"حجم امروز: {today:,.2f}")
-    lines.append(f"میانگین هفته: {week_avg:,.2f}")
-    lines.append(f"میانگین ماه: {month_avg:,.2f}")
-
-    def cmp_txt(val, ref):
-        diff = (val - ref) / ref * 100 if ref else 0
-        s = "بالاتر" if diff > 5 else ("پایین‌تر" if diff < -5 else "مشابه")
-        return f"{s} ({diff:+.1f}%)"
-
-    lines.append(f"نسبت به میانگین هفته: {cmp_txt(today, week_avg)}")
-    lines.append(f"نسبت به میانگین ماه: {cmp_txt(today, month_avg)}")
-    if today > month_avg * 1.5:
-        lines.append("⚠ حجم غیرعادی بالا — احتمال شروع یک حرکت قوی")
-    elif today < month_avg * 0.5:
-        lines.append("حجم پایین‌تر از حد معمول — بازار کم‌نوسان")
-    return "\n".join(lines)
-
-
-def btc_correlation_text(df_coin, df_btc):
-    n = min(len(df_coin), len(df_btc))
-    if n < 15:
-        return ""
-    coin_ret = df_coin["close"].tail(n).pct_change().dropna()
-    btc_ret = df_btc["close"].tail(n).pct_change().dropna()
-    m = min(len(coin_ret), len(btc_ret))
-    if m < 10:
-        return ""
-    coin_ret = coin_ret.tail(m).reset_index(drop=True)
-    btc_ret = btc_ret.tail(m).reset_index(drop=True)
-    corr = coin_ret.corr(btc_ret)
-    if pd.isna(corr):
-        return ""
-    btc_var = btc_ret.var()
-    beta = (coin_ret.cov(btc_ret) / btc_var) if btc_var else float("nan")
-    btc_change = (df_btc["close"].iloc[-1] - df_btc["close"].iloc[-2]) / df_btc["close"].iloc[-2] * 100
-    desc = ("خیلی بالا" if corr >= 0.75 else "نسبتا بالا" if corr >= 0.5
-            else "متوسط" if corr >= 0.2 else "پایین")
-    lines = [f"همبستگی با بیت کوین: {corr:.2f} ({desc})"]
-    if not pd.isna(beta):
-        lines.append(f"بتا: {beta:.2f} — بیت کوین اخیرا {btc_change:+.2f}% → اثر تخمینی: {beta * btc_change:+.2f}%")
-    return "\n".join(lines)
-
-
-# ===========================================================================
-# موتور تصمیم‌گیری چند-عاملی (Multi-Agent Decision Engine)
-# هر Agent مستقل امتیاز میده، بعد MASTER این‌ها رو ترکیب می‌کنه.
-# همه چیز فقط با داده رایگان OHLCV محاسبه میشه — بدون نیاز به API پولی.
-# ===========================================================================
-
-def agent_technical(d):
-    """امتیاز بر اساس RSI, MACD, EMA, Bollinger روی آخرین کندل"""
-    last, prev = d.iloc[-1], d.iloc[-2]
-    bull, bear, rb, rs = score_row(last, prev)
-    score = bull - bear
-    reasons = [f"✅ {r}" for r in rb] + [f"⚠️ {r}" for r in rs]
-    return score, reasons
-
-
-def agent_structure(d, window=3):
-    """
-    تشخیص ساختار بازار: HH/HL (صعودی) یا LH/LL (نزولی) بر اساس آخرین دو پیوت
-    به ترتیب زمانی، و تشخیص ساده BOS (شکست ساختار) وقتی قیمت از آخرین
-    سقف/کف پیوت رد میشه
-    """
-    highs, lows = find_pivots_chronological(d.tail(120), window=window)
-    last_close = d["close"].iloc[-1]
-    reasons = []
-    score = 0
-
-    if len(highs) >= 2 and len(lows) >= 2:
-        recent_high, prev_high = highs[-1], highs[-2]
-        recent_low, prev_low = lows[-1], lows[-2]
-
-        if recent_high > prev_high:
-            score += 1
-            reasons.append("✅ ساختار: سقف بالاتر (HH) — روند صعودی")
-        elif recent_high < prev_high:
-            score -= 1
-            reasons.append("⚠️ ساختار: سقف پایین‌تر (LH) — ضعف روند صعودی")
-
-        if recent_low > prev_low:
-            score += 1
-            reasons.append("✅ ساختار: کف بالاتر (HL) — تایید روند صعودی")
-        elif recent_low < prev_low:
-            score -= 1
-            reasons.append("⚠️ ساختار: کف پایین‌تر (LL) — روند نزولی")
-
-        if last_close > recent_high:
-            score += 1
-            reasons.append("✅ BOS صعودی: قیمت از آخرین سقف مهم عبور کرد")
-        if last_close < recent_low:
-            score -= 1
-            reasons.append("⚠️ BOS نزولی: قیمت زیر آخرین کف مهم شکسته")
-    else:
-        reasons.append("داده کافی برای تشخیص ساختار دقیق نیست")
-
-    return score, reasons
-
-
-def agent_volume(d):
-    """حجم نسبی و واگرایی حجم-قیمت"""
-    recent = d.tail(10)
-    last = d.iloc[-1]
-    reasons = []
-    score = 0
-
-    vol_avg = d["vol_avg20"].iloc[-1]
-    if pd.notna(vol_avg) and vol_avg > 0:
-        rel_vol = last["volume"] / vol_avg
-        if rel_vol > 1.5:
-            score += 1
-            reasons.append(f"✅ حجم بالاتر از میانگین ({rel_vol:.1f}x)")
-        elif rel_vol < 0.5:
-            score -= 1
-            reasons.append(f"⚠️ حجم پایین‌تر از میانگین ({rel_vol:.1f}x) — ضعف تایید حرکت")
-
-    # واگرایی ساده: قیمت سقف جدید ولی حجم کمتر از سقف قبلی
-    if len(recent) >= 6:
-        first_half, second_half = recent.iloc[:5], recent.iloc[5:]
-        if second_half["close"].max() > first_half["close"].max() and \
-           second_half["volume"].mean() < first_half["volume"].mean():
-            score -= 1
-            reasons.append("⚠️ واگرایی منفی: سقف قیمتی جدید با حجم ضعیف‌تر")
-
-    return score, reasons
-
-
-def agent_whale_proxy(d):
-    """
-    نسخه رایگان Whale Agent: چون دسترسی به دیتابیس کیف‌پول‌ها نداریم،
-    از اسپایک‌های حجمی بزرگ همراه با جهت قیمت به‌عنوان جایگزین تقریبی استفاده می‌کنیم.
-    این "تقریبی" است، نه رصد واقعی کیف‌پول.
-    """
-    recent = d.tail(20)
-    vol_avg = recent["volume"].mean()
-    reasons = []
-    score = 0
-    spikes = recent[recent["volume"] > vol_avg * 2.5]
-    if len(spikes) > 0:
-        last_spike = spikes.iloc[-1]
-        if last_spike["close"] > last_spike["open"]:
-            score += 1
-            reasons.append("✅ (تقریبی) اسپایک حجمی بزرگ همراه با رشد قیمت — احتمال ورود پول درشت")
-        else:
-            score -= 1
-            reasons.append("⚠️ (تقریبی) اسپایک حجمی بزرگ همراه با افت قیمت — احتمال خروج پول درشت")
-    else:
-        reasons.append("اسپایک حجمی قابل توجهی در ۲۰ کندل اخیر دیده نشد")
-    return score, reasons
-
-
-def agent_risk(d, entry, sl, tp1):
-    """فاصله تا مقاومت، نوسان (ATR ساده)، و R:R"""
-    reasons = []
-    score = 0
-
+def atr(df, n=14):
+    pc = df["close"].shift(1)
     tr = pd.concat([
-        d["high"] - d["low"],
-        (d["high"] - d["close"].shift()).abs(),
-        (d["low"] - d["close"].shift()).abs(),
+        df["high"] - df["low"],
+        (df["high"] - pc).abs(),
+        (df["low"] - pc).abs(),
     ], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean().iloc[-1]
-    last_close = d["close"].iloc[-1]
+    return tr.rolling(n).mean()
 
-    if pd.notna(atr) and last_close > 0:
-        volatility_pct = atr / last_close * 100
-        if volatility_pct > 8:
-            score -= 1
-            reasons.append(f"⚠️ نوسان بالا (ATR≈{volatility_pct:.1f}% قیمت) — ریسک بیشتر")
+def add_indicators(df):
+    d = df.copy()
+    d["EMA20"] = ema(d["close"], 20)
+    d["EMA50"] = ema(d["close"], 50)
+    d["EMA200"] = ema(d["close"], 200)
+    d["RSI"] = rsi(d["close"], 14)
+    d["ATR"] = atr(d, 14)
+    d["VolumeMA"] = d["volume"].rolling(20).mean()
+    d["VolumeRatio"] = d["volume"] / d["VolumeMA"]
+    return d
 
-    if entry and sl and tp1 and entry != sl:
-        risk = abs(entry - sl)
-        reward = abs(tp1 - entry)
-        rr = reward / risk if risk else 0
-        if rr >= 1.5:
-            score += 1
-            reasons.append(f"✅ نسبت ریسک به ریوارد مناسب (1:{rr:.1f})")
-        else:
-            score -= 1
-            reasons.append(f"⚠️ نسبت ریسک به ریوارد ضعیف (1:{rr:.1f})")
-        return score, reasons, rr
+# ------------------------------------------------------------
+# Swings / structure / levels
+# ------------------------------------------------------------
+def find_swings(df, window=3):
+    highs, lows = [], []
+    for i in range(window, len(df) - window):
+        h = float(df["high"].iloc[i])
+        l = float(df["low"].iloc[i])
+        if h >= df["high"].iloc[i-window:i].max() and h >= df["high"].iloc[i+1:i+window+1].max():
+            highs.append((i, h))
+        if l <= df["low"].iloc[i-window:i].min() and l <= df["low"].iloc[i+1:i+window+1].min():
+            lows.append((i, l))
+    return highs, lows
 
-    return score, reasons, None
+def market_structure(df):
+    d = df.tail(140).reset_index(drop=True)
+    highs, lows = find_swings(d, 3)
+    hh = len(highs) >= 2 and highs[-1][1] > highs[-2][1]
+    hl = len(lows) >= 2 and lows[-1][1] > lows[-2][1]
+    lh = len(highs) >= 2 and highs[-1][1] < highs[-2][1]
+    ll = len(lows) >= 2 and lows[-1][1] < lows[-2][1]
+    if hh and hl:
+        return "HH / HL"
+    if lh and ll:
+        return "LH / LL"
+    return "MIXED"
 
+def levels(df):
+    d = df.tail(160).reset_index(drop=True)
+    current = float(d["close"].iloc[-1])
+    highs, lows = find_swings(d, 3)
+    supports = [v for _, v in lows if v < current]
+    resistances = [v for _, v in highs if v > current]
 
-def counter_signal_check(d, rr, df_btc=None):
-    """
-    موتور مخالف: مستقل از بقیه Agentها، فقط دنبال دلایل نخریدن می‌گرده.
-    """
-    warnings = []
-    last = d.iloc[-1]
-    recent = d.tail(60)
-    resistance = recent["high"].max()
-    last_close = last["close"]
-
-    if resistance > 0 and (resistance - last_close) / last_close * 100 < 2:
-        warnings.append("مقاومت خیلی نزدیکه (کمتر از ۲٪ فاصله)")
-
-    if last["rsi"] > 70:
-        warnings.append("RSI در ناحیه اشباع خرید شدید (بالای ۷۰) — ریسک برگشت")
-
-    if rr is not None and rr < 1.2:
-        warnings.append("نسبت ریسک به ریوارد ضعیفه")
-
-    if df_btc is not None and len(df_btc) > 2:
-        btc_change = (df_btc["close"].iloc[-1] - df_btc["close"].iloc[-2]) / df_btc["close"].iloc[-2] * 100
-        if btc_change < -2:
-            warnings.append(f"بیت کوین اخیرا افت محسوسی داشته ({btc_change:+.1f}%) — ریسک کل بازار")
-
-    vol3 = d["volume"].tail(3)
-    close3 = d["close"].tail(3)
-    if len(vol3) == 3 and vol3.is_monotonic_decreasing and close3.iloc[-1] > close3.iloc[0]:
-        warnings.append("قیمت داره بالا میره ولی حجم مرتب داره کم میشه — تایید ضعیف")
-
-    return warnings
-
-
-def scenario_engine(d):
-    """سه سناریو: صعودی، خنثی، نزولی — با شرط قیمتی مشخص (بر اساس نزدیک‌ترین سطوح)"""
-    highs, lows = find_pivots(d.tail(120), window=3)
-    last_close = d["close"].iloc[-1]
-
-    resistances = sorted([h for h in highs if h > last_close])
-    supports = sorted([l for l in lows if l < last_close], reverse=True)
-
-    r1 = resistances[0] if resistances else last_close * 1.05
-    r2 = resistances[1] if len(resistances) > 1 else r1 * 1.05
-    s1 = supports[0] if supports else last_close * 0.95
-    s2 = supports[1] if len(supports) > 1 else s1 * 0.95
-
-    return (
-        f"🟢 سناریوی صعودی: اگه قیمت از {r1:.6f} با حجم خوب رد بشه، حرکت بعدی سمت "
-        f"{r2:.6f} محتمله\n"
-        f"⚪ سناریوی خنثی: تا وقتی قیمت بین {s1:.6f} و {r1:.6f} بمونه، روند مشخص نیست\n"
-        f"🔴 سناریوی نزولی: اگه قیمت زیر {s1:.6f} بشکنه، افت بیشتر سمت "
-        f"{s2:.6f} محتمله"
-    )
-
-
-def entry_sl_tp_engine(d):
-    """محاسبه Entry / SL / TP1-3 بر اساس نزدیک‌ترین سطوح حمایت/مقاومت واقعی به قیمت فعلی"""
-    highs, lows = find_pivots(d.tail(120), window=3)
-    last_close = d["close"].iloc[-1]
-
-    # مقاومت‌های بالای قیمت فعلی، نزدیک‌ترین اول
-    resistances = sorted([h for h in highs if h > last_close])
-    # حمایت‌های زیر قیمت فعلی، نزدیک‌ترین اول (بزرگ‌ترین عدد کوچیک‌تر از قیمت)
-    supports = sorted([l for l in lows if l < last_close], reverse=True)
-
-    entry = last_close
-    sl = supports[0] * 0.99 if supports else last_close * 0.95
-    tp1 = resistances[0] if resistances else last_close * 1.05
-    tp2 = resistances[1] if len(resistances) > 1 else tp1 * 1.05
-    tp3 = entry + 2 * (tp1 - entry) if tp1 > entry else tp1 * 1.1
-
-    return entry, sl, tp1, tp2, tp3
-
-
-def historical_similarity(d, window=10, top_k=15, forward=5):
-    """
-    الگوی N کندل اخیر رو با الگوهای مشابه در گذشته همون ارز مقایسه می‌کنه
-    و می‌بینه بعد از الگوهای مشابه معمولاً چند درصد صعودی/نزولی بوده.
-    (این یه آمار واقعیه بر پایه دیتای واقعی، نه حدس)
-    """
-    if len(d) < window + forward + 50:
-        return None
-
-    returns = d["close"].pct_change()
-    rsi = d["rsi"]
-    vol_ratio = d["volume"] / d["vol_avg20"].replace(0, np.nan)
-
-    current_feat = np.array([
-        returns.tail(window).mean(),
-        rsi.tail(window).mean(),
-        vol_ratio.tail(window).mean() if pd.notna(vol_ratio.tail(window).mean()) else 1.0,
-    ])
-
-    candidates = []
-    for i in range(50, len(d) - window - forward):
-        seg_ret = returns.iloc[i:i + window].mean()
-        seg_rsi = rsi.iloc[i:i + window].mean()
-        seg_vol = vol_ratio.iloc[i:i + window].mean()
-        if pd.isna(seg_ret) or pd.isna(seg_rsi) or pd.isna(seg_vol):
-            continue
-        feat = np.array([seg_ret, seg_rsi, seg_vol])
-        dist = np.linalg.norm(feat - current_feat)
-        fwd_ret = (d["close"].iloc[i + window + forward - 1] - d["close"].iloc[i + window]) / d["close"].iloc[i + window]
-        candidates.append((dist, fwd_ret))
-
-    if len(candidates) < top_k:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    top = candidates[:top_k]
-    fwd_returns = [c[1] for c in top]
-    win_rate = sum(1 for r in fwd_returns if r > 0) / len(fwd_returns) * 100
-    avg_ret = sum(fwd_returns) / len(fwd_returns) * 100
-
-    return (
-        f"از بین {top_k} الگوی مشابه گذشته این ارز، بعد از {forward} کندل، "
-        f"{win_rate:.0f}٪ صعودی بودن (میانگین تغییر: {avg_ret:+.1f}٪)"
-    )
-
-
-def master_decision_report(symbol, d, df_btc, ex_name):
-    """گزارش نهایی: ترکیب همه Agentها، Counter-Signal، سناریو، Entry/SL/TP"""
-    t_score, t_reasons = agent_technical(d)
-    s_score, s_reasons = agent_structure(d)
-    v_score, v_reasons = agent_volume(d)
-    w_score, w_reasons = agent_whale_proxy(d)
-
-    entry, sl, tp1, tp2, tp3 = entry_sl_tp_engine(d)
-    r_score, r_reasons, rr = agent_risk(d, entry, sl, tp1)
-
-    total = t_score + s_score + v_score + w_score + r_score
-    warnings = counter_signal_check(d, rr, df_btc)
-
-    scores = [t_score, s_score, v_score, w_score]
-    conflict = (max(scores) >= 1 and min(scores) <= -1)
-
-    if len(warnings) >= 2:
-        decision, emoji = "NO TRADE", "🔴"
-    elif total >= 4 and not conflict and len(warnings) == 0:
-        decision, emoji = "BUY", "🟢"
-    elif total <= -3:
-        decision, emoji = "NO TRADE", "🔴"
+    if supports:
+        support = max(supports)
     else:
-        decision, emoji = "WAIT", "🟡"
+        support = float(d["low"].nsmallest(12).max())
 
-    confidence = "HIGH" if (abs(total) >= 5 and not conflict) else ("MEDIUM" if abs(total) >= 2 else "LOW")
+    if resistances:
+        resistance = min(resistances)
+    else:
+        resistance = float(d["high"].nlargest(12).min())
 
-    hist = historical_similarity(d)
+    return {
+        "support": support,
+        "resistance": resistance,
+        "major_low": float(d["low"].min()),
+        "major_high": float(d["high"].max()),
+    }
 
-    lines = [
-        f"🧠 <b>گزارش تصمیم‌گیری کامل — {symbol} ({ex_name.upper()})</b>",
-        "",
-        f"امتیاز تکنیکال: {t_score:+d}",
-        f"امتیاز ساختار بازار: {s_score:+d}",
-        f"امتیاز حجم: {v_score:+d}",
-        f"امتیاز نهنگ (تقریبی): {w_score:+d}",
-        f"امتیاز ریسک: {r_score:+d}",
-        f"<b>امتیاز کل: {total:+d}</b>",
-        f"اطمینان: {confidence}",
-        "",
-        f"{emoji} <b>تصمیم نهایی: {decision}</b>",
+def trendlines(df):
+    d = df.tail(160).reset_index(drop=True)
+    highs, lows = find_swings(d, 3)
+    out = {"down": None, "up": None}
+
+    if len(highs) >= 2:
+        x1, y1 = highs[-2]
+        x2, y2 = highs[-1]
+        if x2 != x1:
+            m = (y2 - y1) / (x2 - x1)
+            out["down"] = (m, y1 - m*x1)
+
+    if len(lows) >= 2:
+        x1, y1 = lows[-2]
+        x2, y2 = lows[-1]
+        if x2 != x1:
+            m = (y2 - y1) / (x2 - x1)
+            out["up"] = (m, y1 - m*x1)
+    return out
+
+# ------------------------------------------------------------
+# Timeframe score
+# ------------------------------------------------------------
+def analyze_tf(raw, tf):
+    d = add_indicators(raw)
+    current = float(d["close"].iloc[-1])
+    e20 = float(d["EMA20"].iloc[-1])
+    e50 = float(d["EMA50"].iloc[-1])
+    e200 = float(d["EMA200"].iloc[-1])
+    rv = float(d["RSI"].iloc[-1])
+    av = float(d["ATR"].iloc[-1])
+    vr = float(d["VolumeRatio"].iloc[-1])
+    lv = levels(d)
+    struct = market_structure(d)
+    tls = trendlines(d)
+
+    score = 50
+    reasons = []
+
+    if current > e20:
+        score += 5; reasons.append("Price > EMA20")
+    else:
+        score -= 5; reasons.append("Price < EMA20")
+
+    if e20 > e50:
+        score += 8; reasons.append("EMA20 > EMA50")
+    else:
+        score -= 8; reasons.append("EMA20 < EMA50")
+
+    if current > e200:
+        score += 8; reasons.append("Price > EMA200")
+    else:
+        score -= 8; reasons.append("Price < EMA200")
+
+    if 50 <= rv <= 65:
+        score += 8; reasons.append("Healthy RSI")
+    elif 65 < rv <= 72:
+        score += 3; reasons.append("Strong RSI")
+    elif rv > 72:
+        score -= 8; reasons.append("Overbought RSI")
+    elif 30 <= rv < 40:
+        score -= 5; reasons.append("Weak RSI")
+    elif rv < 30:
+        score += 3; reasons.append("Oversold RSI")
+
+    if vr >= 1.50:
+        score += 8; reasons.append("Very high volume")
+    elif vr >= 1.20:
+        score += 5; reasons.append("High volume")
+    elif vr < 0.70:
+        score -= 5; reasons.append("Low volume")
+
+    if struct == "HH / HL":
+        score += 10; reasons.append("Bullish structure")
+    elif struct == "LH / LL":
+        score -= 10; reasons.append("Bearish structure")
+
+    sd = (current - lv["support"]) / current * 100
+    rd = (lv["resistance"] - current) / current * 100
+
+    if 0 <= sd <= 2.5:
+        score += 5; reasons.append("Near support")
+    if 0 <= rd <= 2.5:
+        score -= 4; reasons.append("Near resistance")
+
+    prev = float(d["close"].iloc[-2])
+    breakout = "NONE"
+    if prev <= lv["resistance"] and current > lv["resistance"]:
+        breakout = "BULLISH BREAKOUT"
+        if vr >= 1.20:
+            score += 10; reasons.append("Breakout + volume")
+    elif prev >= lv["support"] and current < lv["support"]:
+        breakout = "BEARISH BREAKDOWN"
+        if vr >= 1.20:
+            score -= 10; reasons.append("Breakdown + volume")
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        signal = "STRONG BUY"
+    elif score >= 70:
+        signal = "BUY"
+    elif score >= 60:
+        signal = "BUY CONFIRMATION"
+    elif score >= 45:
+        signal = "WAIT"
+    elif score >= 35:
+        signal = "WEAK SELL"
+    else:
+        signal = "SELL"
+
+    return {
+        "df": d, "timeframe": tf, "price": current,
+        "ema20": e20, "ema50": e50, "ema200": e200,
+        "rsi": rv, "atr": av, "volume_ratio": vr,
+        "support": lv["support"], "resistance": lv["resistance"],
+        "major_low": lv["major_low"], "major_high": lv["major_high"],
+        "structure": struct, "breakout": breakout,
+        "trendlines": tls, "score": float(score),
+        "signal": signal, "reasons": reasons,
+    }
+
+def analyze_btc():
+    a4 = analyze_tf(get_klines("BTCUSDT", "4h", 300), "4h")
+    a1 = analyze_tf(get_klines("BTCUSDT", "1d", 300), "1d")
+    score = round(a4["score"]*0.45 + a1["score"]*0.55, 1)
+    if score >= 75: state = "BULLISH"
+    elif score >= 60: state = "NEUTRAL-BULLISH"
+    elif score >= 45: state = "NEUTRAL"
+    elif score >= 30: state = "BEARISH"
+    else: state = "STRONG BEARISH"
+    return {"score": score, "state": state, "4h": a4, "1d": a1}
+
+# ------------------------------------------------------------
+# Final score
+# ------------------------------------------------------------
+def final_score(analyses, btc):
+    coin = sum(analyses[tf]["score"] * w for tf, w in TIMEFRAME_WEIGHTS.items())
+    adj = 0
+    if btc["score"] >= 75: adj = 5
+    elif btc["score"] >= 65: adj = 3
+    elif btc["score"] < 35: adj = -8
+    elif btc["score"] < 45: adj = -5
+    elif btc["score"] < 55: adj = -2
+    score = round(max(0, min(100, coin + adj)), 1)
+
+    if score >= 80: decision = "STRONG BUY"
+    elif score >= 70: decision = "BUY"
+    elif score >= 60: decision = "BUY ON CONFIRMATION"
+    elif score >= 45: decision = "WAIT"
+    elif score >= 35: decision = "WEAK SELL"
+    else: decision = "SELL"
+    return score, decision
+
+# ------------------------------------------------------------
+# Trade plan
+# ------------------------------------------------------------
+def trade_plan(df, entry, support, resistance, capital):
+    d = add_indicators(df)
+    a = float(d["ATR"].iloc[-1])
+    if not np.isfinite(a) or a <= 0:
+        a = entry * 0.02
+
+    stop = min(support * 0.985, entry - 1.5*a)
+    if stop >= entry:
+        stop = entry * 0.97
+
+    risk = entry - stop
+    if risk <= 0:
+        risk = entry * 0.03
+        stop = entry - risk
+
+    tp1 = resistance if resistance > entry else entry + 1.5*risk
+    if tp1 - entry < 1.2*risk:
+        tp1 = entry + 1.5*risk
+    tp2 = max(tp1 + risk, entry + 2.5*risk)
+    tp3 = max(tp2 + risk, entry + 4.0*risk)
+
+    qty = capital / entry
+
+    def pnl(price):
+        buy = qty * entry
+        sell = qty * price
+        profit = sell - sell*FEE_RATE - buy - buy*FEE_RATE
+        return profit, profit/capital*100
+
+    sl_p, sl_pct = pnl(stop)
+    p1, p1pct = pnl(tp1)
+    p2, p2pct = pnl(tp2)
+    p3, p3pct = pnl(tp3)
+
+    rr = (tp3 - entry) / risk
+
+    return {
+        "entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+        "quantity": qty, "risk": risk, "rr": rr,
+        "sl_profit": sl_p, "sl_percent": sl_pct,
+        "tp1_profit": p1, "tp1_percent": p1pct,
+        "tp2_profit": p2, "tp2_percent": p2pct,
+        "tp3_profit": p3, "tp3_percent": p3pct,
+    }
+
+# ------------------------------------------------------------
+# Chart drawing
+# ------------------------------------------------------------
+def draw_candles(ax, df):
+    for i in range(len(df)):
+        o = float(df["open"].iloc[i])
+        h = float(df["high"].iloc[i])
+        l = float(df["low"].iloc[i])
+        c = float(df["close"].iloc[i])
+        color = GREEN if c >= o else RED
+        ax.plot([i, i], [l, h], color=color, linewidth=1)
+        body_low = min(o, c)
+        body_h = max(abs(c-o), h*0.00005)
+        ax.add_patch(Rectangle(
+            (i-0.32, body_low), 0.64, body_h,
+            facecolor=color, edgecolor=color, linewidth=0.4
+        ))
+
+def hline(ax, price, label, color, style="--", lw=1.5):
+    ax.axhline(price, color=color, linestyle=style, linewidth=lw, alpha=0.9)
+    ax.text(
+        1.002, price, f" {label} {fmt_price(price)}",
+        transform=ax.get_yaxis_transform(), color=color,
+        fontsize=9, va="center", fontweight="bold"
+    )
+
+def trendline(ax, line, n, color, label):
+    if line is None:
+        return
+    m, b = line
+    x = np.array([0, n-1])
+    y = m*x+b
+    ax.plot(x, y, color=color, linewidth=2, alpha=0.85)
+    mid = n*0.55
+    ax.text(mid, m*mid+b, label, color=color, fontsize=9, fontweight="bold")
+
+def panel(fig, rect, title, lines, edge, title_size=11, line_size=8.5):
+    ax = fig.add_axes(rect)
+    ax.set_facecolor(PANEL)
+    for s in ax.spines.values():
+        s.set_edgecolor(edge)
+        s.set_linewidth(1.3)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.text(0.04, 0.88, title, color=edge, fontsize=title_size, fontweight="bold", va="top")
+    y = 0.68
+    for line in lines:
+        ax.text(0.04, y, line, color=TEXT, fontsize=line_size, va="top")
+        y -= 0.16
+    return ax
+
+def draw_price_table(ax, plan, capital):
+    rows = [
+        ("Stop Loss", plan["stop"], plan["sl_profit"], plan["sl_percent"]),
+        ("Entry", plan["entry"], 0.0, 0.0),
+        ("TP1", plan["tp1"], plan["tp1_profit"], plan["tp1_percent"]),
+        ("TP2", plan["tp2"], plan["tp2_profit"], plan["tp2_percent"]),
+        ("TP3", plan["tp3"], plan["tp3_profit"], plan["tp3_percent"]),
     ]
+    ax.axis("off")
+    ax.set_facecolor(PANEL)
+    ax.text(0.5, 1.04, fa(f"سود و ضرر احتمالی با سرمایه ${capital:,.0f}"),
+            ha="center", color=TEXT, fontsize=11, fontweight="bold")
+    headers = ["Level", "Price", "P/L USD", "P/L %"]
+    table = ax.table(
+        cellText=[[r[0], fmt_price(r[1]), f"{r[2]:+,.2f}", f"{r[3]:+.2f}%"] for r in rows],
+        colLabels=headers, cellLoc="center", colLoc="center", loc="upper center",
+        bbox=[0.01, 0.02, 0.98, 0.88]
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_facecolor(PANEL)
+        cell.set_edgecolor(GRID)
+        cell.get_text().set_color(TEXT)
+        if row == 0:
+            cell.get_text().set_weight("bold")
+        if row > 0 and col in (2, 3):
+            val = rows[row-1][2]
+            cell.get_text().set_color(RED if val < 0 else GREEN if val > 0 else TEXT)
 
-    if conflict:
-        lines.append("⚠️ ANALYSIS CONFLICT — موتورهای تحلیل با هم اختلاف دارن")
+def generate_chart(symbol, analyses, btc, plan, score, decision, capital, out_file=None):
+    main = analyses["4h"]
+    df = main["df"].tail(105).reset_index(drop=True)
 
-    lines.append("\n<b>دلایل موافق:</b>")
-    for r in t_reasons + s_reasons + v_reasons + w_reasons + r_reasons:
-        if r.startswith("✅"):
-            lines.append(r)
+    if out_file is None:
+        out_file = f"{symbol.replace('USDT','')}_FINAL_ANALYSIS.png"
 
-    lines.append("\n<b>دلایل مخالف / هشدارها:</b>")
-    any_warn = False
-    for r in t_reasons + s_reasons + v_reasons + w_reasons + r_reasons:
-        if r.startswith("⚠️"):
-            lines.append(r)
-            any_warn = True
-    for w in warnings:
-        lines.append(f"🚩 {w}")
-        any_warn = True
-    if not any_warn:
-        lines.append("موردی یافت نشد")
+    fig = plt.figure(figsize=(18, 13), facecolor=BG)
 
-    if decision == "BUY":
-        lines.append(f"\n<b>Entry:</b> {entry:.6f}")
-        lines.append(f"<b>SL:</b> {sl:.6f}")
-        lines.append(f"<b>TP1:</b> {tp1:.6f}")
-        lines.append(f"<b>TP2:</b> {tp2:.6f}")
-        lines.append(f"<b>TP3:</b> {tp3:.6f}")
-        if rr:
-            lines.append(f"<b>R/R:</b> 1:{rr:.1f}")
+    # Main chart
+    ax = fig.add_axes([0.055, 0.405, 0.89, 0.49])
+    ax.set_facecolor(BG)
+    draw_candles(ax, df)
 
-    lines.append("\n<b>سناریوها:</b>")
-    lines.append(scenario_engine(d))
+    ax.plot(df.index, df["EMA20"], color=YELLOW, linewidth=1.1, label="EMA20")
+    ax.plot(df.index, df["EMA50"], color=BLUE, linewidth=1.1, label="EMA50")
+    ax.plot(df.index, df["EMA200"], color=PURPLE, linewidth=1.1, label="EMA200")
 
-    if hist:
-        lines.append(f"\n<b>شباهت تاریخی:</b> {hist}")
+    # Strong zones
+    sr = main["resistance"]
+    sup = main["support"]
+    ax.axhspan(sr*0.992, sr*1.008, color=RED, alpha=0.10)
+    ax.axhspan(sup*0.992, sup*1.008, color=GREEN, alpha=0.08)
 
-    lines.append(
-        "\n[این گزارش صرفاً بر پایه داده قیمت/حجم رایگانه، نه دیتای آنچین/فاندامنتال "
-        "پولی. تصمیم نهایی معامله با خودته و مدیریت ریسک رو فراموش نکن.]"
+    hline(ax, sr, "RESISTANCE", RED, "-", 1.8)
+    hline(ax, sup, "SUPPORT", GREEN, "-", 1.8)
+    hline(ax, plan["entry"], "ENTRY", ORANGE, "--", 2.0)
+    hline(ax, plan["stop"], "STOP LOSS", RED, "--", 2.0)
+    hline(ax, plan["tp1"], "TP1", GREEN, ":", 1.7)
+    hline(ax, plan["tp2"], "TP2", GREEN, ":", 1.7)
+    hline(ax, plan["tp3"], "TP3", GREEN, ":", 1.7)
+
+    trendline(ax, main["trendlines"]["down"], len(df), YELLOW, fa("خط روند نزولی"))
+    trendline(ax, main["trendlines"]["up"], len(df), BLUE, fa("خط روند صعودی"))
+
+    # Breakout arrow / projected path
+    breakout = sr
+    x0 = len(df) - 12
+    x1 = len(df) + 4
+    x2 = len(df) + 15
+    x3 = len(df) + 27
+    y0 = plan["entry"]
+    ax.annotate("", xy=(x1, breakout*1.02), xytext=(x0, y0),
+                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
+    ax.annotate("", xy=(x2, plan["tp1"]), xytext=(x1, breakout*1.02),
+                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
+    ax.annotate("", xy=(x3, plan["tp2"]), xytext=(x2, plan["tp1"]),
+                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
+    ax.text(x0+3, breakout, fa("Breakout Level"), color=ORANGE, fontsize=9, fontweight="bold")
+
+    # Bearish path
+    ax.annotate("", xy=(x2, plan["stop"]), xytext=(x0, y0),
+                arrowprops=dict(arrowstyle="->", color=RED, lw=1.8, linestyle="--"))
+
+    # Title
+    current = main["price"]
+    ax.set_title(
+        fa(f"{symbol} • 4H • BINANCE\n"
+           f"قیمت {fmt_price(current)}   |   امتیاز نهایی {score:.0f}/100   |   {decision}"),
+        color=TEXT, fontsize=16, fontweight="bold", pad=12
+    )
+    ax.grid(color=GRID, alpha=0.30)
+    ax.tick_params(colors=TEXT, labelsize=8)
+    for s in ax.spines.values():
+        s.set_color(GRID)
+
+    # RSI
+    ar = fig.add_axes([0.055, 0.275, 0.89, 0.09])
+    ar.set_facecolor(BG)
+    ar.plot(df.index, df["RSI"], color=PURPLE, linewidth=1.7)
+    ar.axhline(70, color=RED, linestyle="--", alpha=0.45)
+    ar.axhline(50, color=YELLOW, linestyle="--", alpha=0.35)
+    ar.axhline(30, color=GREEN, linestyle="--", alpha=0.45)
+    ar.set_ylim(0, 100)
+    ar.set_ylabel("RSI", color=TEXT)
+    ar.tick_params(colors=TEXT, labelsize=8)
+    ar.grid(color=GRID, alpha=0.25)
+    ar.text(len(df)-16, float(df["RSI"].iloc[-1])+3,
+            fa(f"RSI = {df['RSI'].iloc[-1]:.1f}"), color=PURPLE, fontsize=9, fontweight="bold")
+
+    # Volume
+    av = fig.add_axes([0.055, 0.16, 0.89, 0.08])
+    av.set_facecolor(BG)
+    for i in range(len(df)):
+        c = GREEN if df["close"].iloc[i] >= df["open"].iloc[i] else RED
+        av.bar(i, df["volume"].iloc[i], color=c, width=0.65, alpha=0.75)
+    av.plot(df.index, df["VolumeMA"], color=YELLOW, linewidth=1.1)
+    av.tick_params(colors=TEXT, labelsize=8)
+    av.set_ylabel("VOL", color=TEXT)
+    av.grid(color=GRID, alpha=0.25)
+
+    # Panels
+    tf_lines = []
+    for tf in ["15m", "30m", "4h", "1d"]:
+        a = analyses[tf]
+        tf_lines.append(f"{tf:>3}   {a['score']:.0f}/100   {a['signal']}")
+    tf_lines.append(f"BTC FILTER   {btc['score']:.0f}/100")
+    tf_lines.append(f"FINAL         {score:.0f}/100")
+    panel(fig, [0.055, 0.035, 0.245, 0.105], fa("امتیاز تایم‌فریم‌ها"), tf_lines, BLUE)
+
+    buy_lines = [
+        fa(f"• تثبیت بالای {fmt_price(sr)}"),
+        fa(f"• هدف 1: {fmt_price(plan['tp1'])}"),
+        fa(f"• هدف 2: {fmt_price(plan['tp2'])}"),
+        fa(f"• هدف 3: {fmt_price(plan['tp3'])}"),
+        fa("• تأیید حجم و ساختار صعودی"),
+    ]
+    panel(fig, [0.315, 0.035, 0.245, 0.105], fa("سناریوی خرید (صعودی)"), buy_lines, GREEN)
+
+    sell_lines = [
+        fa(f"• عدم شکست {fmt_price(sr)}"),
+        fa(f"• شکست حمایت {fmt_price(sup)}"),
+        fa(f"• حد ضرر: {fmt_price(plan['stop'])}"),
+        fa("• ضعف حجم / ساختار نزولی"),
+        fa("• در صورت شکست حمایت، خروج"),
+    ]
+    panel(fig, [0.575, 0.035, 0.245, 0.105], fa("سناریوی فروش / ریسک (نزولی)"), sell_lines, RED)
+
+    money_lines = [
+        f"ENTRY: {fmt_price(plan['entry'])}",
+        f"STOP:  {fmt_price(plan['stop'])}",
+        f"TP1:   {fmt_price(plan['tp1'])}",
+        f"TP2:   {fmt_price(plan['tp2'])}",
+        f"TP3:   {fmt_price(plan['tp3'])}",
+        f"R/R:   1:{plan['rr']:.2f}",
+    ]
+    panel(fig, [0.835, 0.035, 0.11, 0.105], "TRADE PLAN", money_lines, ORANGE, line_size=7.5)
+
+    # P/L table in a separate axis above panels
+    tab_ax = fig.add_axes([0.315, 0.005, 0.47, 0.025])
+    draw_price_table(tab_ax, plan, capital)
+
+    # Small money / BTC box
+    fig.text(
+        0.79, 0.145,
+        fa(f"سرمایه: ${capital:,.0f}\n"
+           f"تعداد تقریبی: {plan['quantity']:,.0f}\n"
+           f"BTC: {btc['state']} ({btc['score']:.0f}/100)"),
+        color=TEXT, fontsize=9, va="top",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor=PANEL, edgecolor=ORANGE)
     )
 
-    return "\n".join(lines)
+    plt.savefig(out_file, dpi=180, facecolor=BG, bbox_inches="tight")
+    plt.close(fig)
+    return out_file
 
+# ------------------------------------------------------------
+# Console report
+# ------------------------------------------------------------
+def print_report(symbol, capital, analyses, btc, score, decision, plan, image_path):
+    print("\n" + "="*76)
+    print(f"{symbol} / SPOT FINAL ANALYSIS")
+    print("="*76)
+    print(f"FINAL SCORE : {score:.0f}/100")
+    print(f"DECISION    : {decision}")
+    print(f"BTC FILTER  : {btc['score']:.0f}/100 - {btc['state']}")
+    print("-"*76)
 
-def analyze_one_timeframe(df, name, symbol, df_btc=None, is_btc=False, make_chart=True):
-    """برمی‌گردونه: (متن گزارش, مسیر فایل نمودار یا None, وضعیت کلی 'buy'/'sell'/'neutral')"""
-    if len(df) < 55:
-        return f"=== {name} ===\nداده کافی نیست.", None, "neutral"
-
-    d = compute_indicators(df)
-    d = generate_signals(d)
-    last, prev = d.iloc[-1], d.iloc[-2]
-    change_pct = (last["close"] - prev["close"]) / prev["close"] * 100
-    recent = d.tail(60)
-    resistance = recent["high"].max()
-    support = recent["low"].min()
-    ph, pl = find_pivots(d.tail(100), window=3)
-
-    bull, bear, rb, rs = score_row(last, prev)
-    if bull >= 2 and bull > bear:
-        overall, reasons, status = "🟢 سیگنال خرید", rb, "buy"
-    elif bear >= 2 and bear > bull:
-        overall, reasons, status = "🔴 سیگنال فروش", rs, "sell"
-    else:
-        overall, reasons, status = "⚪ خنثی", ["اندیکاتورها هم‌جهت نیستن"], "neutral"
-
-    lines = [f"=== تایم‌فریم {name} ===",
-             f"قیمت: {last['close']:.6f} ({change_pct:+.2f}%)",
-             f"RSI: {last['rsi']:.1f} | MACD: {last['macd']:.6f}/{last['macd_signal']:.6f}",
-             f"SMA20/50: {last['sma20']:.6f} / {last['sma50']:.6f}",
-             f"مقاومت نزدیک: {resistance:.6f} | حمایت نزدیک: {support:.6f}"]
-    if ph[:3]:
-        lines.append("مقاومت‌های مهم: " + ", ".join(f"{v:.6f}" for v in ph[:3]))
-    if pl[:3]:
-        lines.append("حمایت‌های مهم: " + ", ".join(f"{v:.6f}" for v in pl[:3]))
-    lines.append(f"\nوضعیت: {overall}")
-    lines += [f"  - {r}" for r in reasons]
-
-    if df_btc is not None and not is_btc:
-        bt = btc_correlation_text(df, df_btc)
-        if bt:
-            lines.append("\nتاثیر بیت کوین:")
-            lines.append(bt)
-
-    chart_path = None
-    if make_chart:
-        try:
-            chart_path = plot_chart(d, symbol, name)
-        except Exception as e:
-            lines.append(f"(خطا در رسم نمودار: {e})")
-
-    return "\n".join(lines), chart_path, status
-
-
-def run_full_analysis_and_send(symbol, chat_id):
-    """اجرای تحلیل کامل روی هر سه تایم‌فریم و ارسال به تلگرام"""
-    exchange, ex_name = resolve_exchange(symbol)
-    if exchange is None:
-        tg_send_message(
-            f"نماد {symbol} نه توی بایننس پیدا شد نه توی بیت‌گت. "
-            f"املا رو چک کن (مثلاً VELVET/USDT) یا مطمئن شو این ارز روی یکی از این دو صرافی لیست شده.",
-            chat_id=chat_id,
+    for tf in ["15m", "30m", "4h", "1d"]:
+        a = analyses[tf]
+        print(
+            f"{tf:>3} | Score {a['score']:>5.1f} | RSI {a['rsi']:>5.1f} | "
+            f"Vol {a['volume_ratio']:>4.2f}x | {a['structure']:<8} | {a['signal']}"
         )
-        return
 
-    is_btc = symbol.upper().startswith("BTC/")
+    print("-"*76)
+    print(f"ENTRY       : {fmt_price(plan['entry'])}")
+    print(f"STOP LOSS   : {fmt_price(plan['stop'])}")
+    print(f"TP1         : {fmt_price(plan['tp1'])}")
+    print(f"TP2         : {fmt_price(plan['tp2'])}")
+    print(f"TP3         : {fmt_price(plan['tp3'])}")
+    print(f"QUANTITY    : {plan['quantity']:,.6f}")
+    print(f"RISK/REWARD : 1:{plan['rr']:.2f}")
+    print("-"*76)
+    print(f"SL  P/L     : ${plan['sl_profit']:+,.2f} ({plan['sl_percent']:+.2f}%)")
+    print(f"TP1 P/L     : ${plan['tp1_profit']:+,.2f} ({plan['tp1_percent']:+.2f}%)")
+    print(f"TP2 P/L     : ${plan['tp2_profit']:+,.2f} ({plan['tp2_percent']:+.2f}%)")
+    print(f"TP3 P/L     : ${plan['tp3_profit']:+,.2f} ({plan['tp3_percent']:+.2f}%)")
+    print("-"*76)
+    print(f"IMAGE       : {os.path.abspath(image_path)}")
+    print("="*76)
 
-    df_4h = fetch_ohlcv(exchange, symbol, "4h")
-    df_1d = fetch_ohlcv(exchange, symbol, "1d")
-    df_5d = resample_5d(df_1d)
-
-    # همیشه بیت کوین رو از بایننس می‌گیریم تا همبستگی یکدست باشه
-    df_btc_4h = df_btc_1d = df_btc_5d = None
-    if not is_btc:
-        try:
-            btc_exchange = ccxt.binance()
-            df_btc_4h = fetch_ohlcv(btc_exchange, "BTC/USDT", "4h")
-            df_btc_1d = fetch_ohlcv(btc_exchange, "BTC/USDT", "1d")
-            df_btc_5d = resample_5d(df_btc_1d)
-        except Exception:
-            pass
-
-    tg_send_message(f"منبع داده: {ex_name.upper()}", chat_id=chat_id)
-    tg_send_message(volume_report_text(df_1d), chat_id=chat_id)
-
-    for df, name, dbtc in [(df_4h, "4ساعته", df_btc_4h), (df_1d, "روزانه", df_btc_1d), (df_5d, "5روزه", df_btc_5d)]:
-        text, chart_path, _ = analyze_one_timeframe(df, name, symbol, df_btc=dbtc, is_btc=is_btc)
-        tg_send_message(text, chat_id=chat_id)
-        if chart_path:
-            tg_send_photo(chart_path, caption=f"{symbol} - {name}", chat_id=chat_id)
-
-    # گزارش نهایی موتور تصمیم‌گیری چند-عاملی (بر پایه تایم‌فریم روزانه)
-    try:
-        d_1d = compute_indicators(df_1d)
-        report = master_decision_report(symbol, d_1d, df_btc_1d, ex_name)
-        tg_send_message(report, chat_id=chat_id)
-    except Exception as e:
-        tg_send_message(f"(خطا در موتور تصمیم‌گیری: {e})", chat_id=chat_id)
-
-    tg_send_message("[یادآوری: این تحلیل تضمینی نیست، مدیریت ریسک رو فراموش نکن.]", chat_id=chat_id)
-
-
-# ===========================================================================
-# رصد نهنگ — معاملات درشت روی بایننس، لحظه‌ای از طریق WebSocket
-# ===========================================================================
-
-def build_stream_url(symbols):
-    streams = "/".join(f"{s.lower()}@aggTrade" for s in symbols)
-    return f"wss://stream.binance.com:9443/stream?streams={streams}"
-
-
-def on_ws_message(ws, message):
-    try:
-        payload = json.loads(message)
-        data = payload.get("data", {})
-        price = float(data.get("p", 0))
-        qty = float(data.get("q", 0))
-        is_seller_taker = data.get("m", False)  # True یعنی فروشنده taker بوده (فشار فروش)
-        symbol = data.get("s", "")
-        value_usd = price * qty
-        if value_usd >= WHALE_USD_THRESHOLD and state.get("whales_enabled", True):
-            emoji = "🔴" if is_seller_taker else "🟢"
-            direction = "فروش بزرگ" if is_seller_taker else "خرید بزرگ"
-            text = (f"{emoji} <b>معامله نهنگ — {symbol}</b>\n"
-                    f"نوع: {direction}\n"
-                    f"قیمت: {price:,.4f}\n"
-                    f"مقدار: {qty:,.4f}\n"
-                    f"ارزش: ${value_usd:,.0f}\n"
-                    f"زمان: {datetime.now().strftime('%H:%M:%S')}")
-            print(text.replace("<b>", "").replace("</b>", ""))
-            tg_send_message(text)
-    except Exception as e:
-        print(f"[نهنگ] خطا در پردازش پیام: {e}")
-
-
-def on_ws_error(ws, error):
-    print(f"[نهنگ] خطای اتصال: {error}")
-
-
-def on_ws_close(ws, code, msg):
-    print("[نهنگ] اتصال قطع شد.")
-
-
-def on_ws_open(ws):
-    print(f"[نهنگ] رصد فعال برای: {state.get('watch')}")
-
-
-def whale_watcher_loop():
-    while True:
-        symbols = state.get("watch") or WATCHED_SYMBOLS_DEFAULT
-        url = build_stream_url(symbols)
-        ws = websocket.WebSocketApp(
-            url, on_message=on_ws_message, on_error=on_ws_error,
-            on_close=on_ws_close, on_open=on_ws_open,
-        )
-        ws_thread_ref["current"] = ws
-        try:
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            print(f"[نهنگ] خطای غیرمنتظره: {e}")
-        time.sleep(5)  # قبل از تلاش مجدد کمی صبر کن
-
-
-# ===========================================================================
-# بررسی خودکار دوره‌ای نمادهای تحت رصد و اطلاع‌رسانی سیگنال قوی
-# ===========================================================================
-
-last_alert_status = {}  # symbol -> آخرین وضعیتی که اطلاع دادیم
-
-
-def auto_analysis_loop():
-    while True:
-        time.sleep(AUTO_ANALYSIS_INTERVAL_MIN * 60)
-        symbols = state.get("watch") or []
-        for sym in symbols:
-            pretty = sym[:-4] + "/" + sym[-4:] if sym.endswith("USDT") else sym
-            try:
-                exchange, ex_name = resolve_exchange(pretty)
-                if exchange is None:
-                    continue
-                df_1d = fetch_ohlcv(exchange, pretty, "1d")
-                text, _, status = analyze_one_timeframe(df_1d, "روزانه", pretty, make_chart=False)
-                if status in ("buy", "sell") and last_alert_status.get(sym) != status:
-                    tg_send_message(f"⏰ <b>هشدار خودکار — {pretty} ({ex_name.upper()})</b>\n\n{text}")
-                last_alert_status[sym] = status
-            except Exception as e:
-                print(f"[خودکار] خطا برای {sym}: {e}")
-
-
-# ===========================================================================
-# مدیریت دستورات تلگرام
-# ===========================================================================
-
-HELP_TEXT = (
-    "دستورات:\n"
-    "/analyze BTC/USDT — تحلیل کامل + نمودار + گزارش تصمیم‌گیری BUY/WAIT/NO TRADE\n"
-    "/scan — رتبه‌بندی همه نمادهای تحت رصد بر اساس امتیاز\n"
-    "/watch SOLUSDT — اضافه کردن به رصد نهنگ\n"
-    "/unwatch SOLUSDT — حذف از رصد نهنگ\n"
-    "/watchlist — نمایش لیست رصد\n"
-    "/whales_on یا /whales_off — روشن/خاموش کردن هشدار نهنگ\n"
-    "/help — همین راهنما"
-)
-
-
-def handle_command(text, chat_id):
-    parts = text.strip().split()
-    if not parts:
-        return
-    cmd = parts[0].lower()
-
-    if cmd == "/start":
-        with state_lock:
-            state["chat_id"] = chat_id
-            save_state(state)
-        tg_send_message("سلام! ربات فعال شد. ✅\n\n" + HELP_TEXT, chat_id=chat_id)
-
-    elif cmd == "/scan":
-        symbols = state.get("watch") or []
-        if not symbols:
-            tg_send_message("لیست رصدت خالیه. اول با /watch یه چندتا نماد اضافه کن.", chat_id=chat_id)
-            return
-        tg_send_message(f"در حال اسکن {len(symbols)} نماد ... ⏳", chat_id=chat_id)
-        results = []
-        for sym in symbols:
-            pretty = sym[:-4] + "/" + sym[-4:] if sym.endswith("USDT") else sym
-            try:
-                exchange, ex_name = resolve_exchange(pretty)
-                if exchange is None:
-                    continue
-                df_1d = fetch_ohlcv(exchange, pretty, "1d")
-                if len(df_1d) < 55:
-                    continue
-                d = compute_indicators(df_1d)
-                t, _ = agent_technical(d)
-                s, _ = agent_structure(d)
-                v, _ = agent_volume(d)
-                w, _ = agent_whale_proxy(d)
-                total = t + s + v + w
-                results.append((pretty, total, ex_name))
-            except Exception as e:
-                print(f"[اسکن] خطا برای {sym}: {e}")
-        if not results:
-            tg_send_message("چیزی برای گزارش پیدا نشد.", chat_id=chat_id)
-            return
-        results.sort(key=lambda x: x[1], reverse=True)
-        lines = ["🏆 <b>رتبه‌بندی نمادهای تحت رصد</b>\n"]
-        for i, (sym, score, ex_name) in enumerate(results, 1):
-            lines.append(f"{i}. {sym} ({ex_name.upper()}) — امتیاز: {score:+d}")
-        tg_send_message("\n".join(lines), chat_id=chat_id)
-
-    elif cmd == "/help":
-        tg_send_message(HELP_TEXT, chat_id=chat_id)
-
-    elif cmd == "/analyze":
-        if len(parts) < 2:
-            tg_send_message("مثال: /analyze BTC/USDT", chat_id=chat_id)
-            return
-        symbol = parts[1].upper()
-        if "/" not in symbol:
-            symbol += "/USDT"
-        tg_send_message(f"در حال تحلیل {symbol} ... ⏳", chat_id=chat_id)
-        try:
-            run_full_analysis_and_send(symbol, chat_id)
-        except Exception as e:
-            tg_send_message(f"خطا: {e}", chat_id=chat_id)
-
-    elif cmd == "/watch":
-        if len(parts) < 2:
-            tg_send_message("مثال: /watch SOLUSDT", chat_id=chat_id)
-            return
-        sym = parts[1].upper().replace("/", "")
-        with state_lock:
-            if sym not in state["watch"]:
-                state["watch"].append(sym)
-                save_state(state)
-        tg_send_message(f"{sym} به رصد نهنگ اضافه شد.", chat_id=chat_id)
-        if ws_thread_ref["current"]:
-            ws_thread_ref["current"].close()
-
-    elif cmd == "/unwatch":
-        if len(parts) < 2:
-            tg_send_message("مثال: /unwatch SOLUSDT", chat_id=chat_id)
-            return
-        sym = parts[1].upper().replace("/", "")
-        with state_lock:
-            if sym in state["watch"]:
-                state["watch"].remove(sym)
-                save_state(state)
-        tg_send_message(f"{sym} از رصد نهنگ حذف شد.", chat_id=chat_id)
-        if ws_thread_ref["current"]:
-            ws_thread_ref["current"].close()
-
-    elif cmd == "/watchlist":
-        tg_send_message("نمادهای تحت رصد:\n" + "\n".join(state.get("watch", [])), chat_id=chat_id)
-
-    elif cmd == "/whales_on":
-        with state_lock:
-            state["whales_enabled"] = True
-            save_state(state)
-        tg_send_message("هشدار نهنگ فعال شد. ✅", chat_id=chat_id)
-
-    elif cmd == "/whales_off":
-        with state_lock:
-            state["whales_enabled"] = False
-            save_state(state)
-        tg_send_message("هشدار نهنگ غیرفعال شد.", chat_id=chat_id)
-
-    else:
-        tg_send_message("دستور شناخته نشد. /help رو بزن.", chat_id=chat_id)
-
-
-def telegram_polling_loop():
-    last_update_id = 0
-    print("[تلگرام] در حال گوش دادن به پیام‌ها ...")
-    while True:
-        try:
-            resp = requests.get(f"{TELEGRAM_API}/getUpdates", params={
-                "offset": last_update_id + 1, "timeout": 30
-            }, timeout=35)
-            data = resp.json()
-            for update in data.get("result", []):
-                last_update_id = update["update_id"]
-                msg = update.get("message", {})
-                text = msg.get("text", "")
-                chat_id = msg.get("chat", {}).get("id")
-                if text and chat_id:
-                    handle_command(text, chat_id)
-        except Exception as e:
-            print(f"[تلگرام] خطا: {e}")
-            time.sleep(5)
-
-
-# ===========================================================================
-# اجرای برنامه
-# ===========================================================================
-
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
 def main():
-    if "اینجا توکن" in TELEGRAM_BOT_TOKEN:
-        print("⚠ اول باید توکن بات تلگرامت رو توی متغیر TELEGRAM_BOT_TOKEN بذاری.")
-        sys.exit(1)
+    print("\n" + "="*76)
+    print("UNIVERSAL SPOT ANALYZER - FINAL VISUAL")
+    print("15m + 30m + 4H + 1D + BTC + AUTOMATIC PNG")
+    print("="*76)
 
-    print("ربات در حال اجراست ...")
-    print(f"نمادهای تحت رصد نهنگ: {state.get('watch')}")
-    print("توی تلگرام /start رو بزن تا فعال بشه.")
-
-    threading.Thread(target=telegram_polling_loop, daemon=True).start()
-    threading.Thread(target=whale_watcher_loop, daemon=True).start()
-    threading.Thread(target=auto_analysis_loop, daemon=True).start()
+    symbol = normalize_symbol(input("نام ارز: ").strip())
 
     while True:
-        time.sleep(60)
+        try:
+            capital = float(input("سرمایه به دلار: ").strip())
+            if capital <= 0:
+                raise ValueError
+            break
+        except ValueError:
+            print("سرمایه باید عدد مثبت باشد.")
 
+    entry_text = input(
+        "قیمت ورود دلخواه (خالی = قیمت فعلی): "
+    ).strip()
+
+    print("\n[1/3] BTC...")
+    btc = analyze_btc()
+
+    print(f"[2/3] {symbol}...")
+    analyses = {}
+    for tf in ["15m", "30m", "4h", "1d"]:
+        print(f"   -> {tf}")
+        analyses[tf] = analyze_tf(get_klines(symbol, tf, 300), tf)
+
+    if entry_text:
+        entry = float(entry_text)
+    else:
+        entry = analyses["15m"]["price"]
+
+    if entry <= 0:
+        raise ValueError("Entry must be > 0")
+
+    score, decision = final_score(analyses, btc)
+
+    main = analyses["4h"]
+    plan = trade_plan(
+        main["df"], entry,
+        main["support"], main["resistance"],
+        capital
+    )
+
+    print("\n[3/3] Generating image...")
+    image_path = generate_chart(
+        symbol, analyses, btc, plan,
+        score, decision, capital
+    )
+
+    print_report(
+        symbol, capital, analyses, btc,
+        score, decision, plan, image_path
+    )
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    except Exception as e:
+        print(f"\nERROR: {e}")
+        print("Check symbol, internet connection, and Binance availability.")
