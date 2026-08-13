@@ -1,742 +1,1309 @@
 # -*- coding: utf-8 -*-
-"""
-RESOLV / UNIVERSAL SPOT ANALYZER - FINAL VISUAL VERSION
----------------------------------------------------------
-Input:
-  Coin symbol, capital in USD, optional desired entry price.
-
-Analysis:
-  15m + 30m + 4H + 1D
-  BTC 4H + 1D filter
-  EMA20/50/200, RSI, ATR, Volume, Support/Resistance,
-  Market Structure, Trendlines, Breakout.
-
-Output:
-  A professional PNG similar to the supplied sample:
-  candles + levels + trendlines + Entry/SL/TP + RSI + Volume
-  + timeframe scores + BTC filter + P/L table + trade plan.
-
-Install:
-  pip install requests pandas numpy matplotlib
-Optional for Persian labels:
-  pip install arabic-reshaper python-bidi
-"""
+# ============================================================
+# SPOT ANALYZER TELEGRAM BOT - SINGLE FILE VERSION
+# ============================================================
+# Features:
+# - Telegram button interface
+# - Any Binance USDT spot symbol
+# - 15m / 30m / 4H / 1D analysis
+# - BTC market filter
+# - RSI, EMA20/50/200, volume
+# - Support / resistance
+# - Trendline approximation
+# - Breakout level
+# - Entry / SL / TP1 / TP2 / TP3
+# - Capital-based P/L
+# - Automatic annotated PNG chart
+# - NO trade execution
+#
+# Install:
+#   pip install python-telegram-bot pandas numpy requests matplotlib
+#
+# Set token:
+# Linux/macOS:
+#   export TELEGRAM_BOT_TOKEN="YOUR_BOTFATHER_TOKEN"
+#
+# Windows PowerShell:
+#   $env:TELEGRAM_BOT_TOKEN="YOUR_BOTFATHER_TOKEN"
+#
+# Run:
+#   python telegram_spot_analyzer.py
+# ============================================================
 
 import os
+import re
+import time
 import math
+import asyncio
+from pathlib import Path
+
 import requests
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from matplotlib.ticker import FuncFormatter
+
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    ConversationHandler,
+    filters,
+)
 
 # ------------------------------------------------------------
-# Optional Persian text support
+# CONFIG
 # ------------------------------------------------------------
-try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
 
-    def fa(text):
-        return get_display(arabic_reshaper.reshape(str(text)))
-except Exception:
-    def fa(text):
-        return str(text)
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+BINANCE_BASE = "https://api.binance.com"
+REPORT_DIR = Path("reports")
+REPORT_DIR.mkdir(exist_ok=True)
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-BASE_URL = "https://api.binance.com/api/v3"
-FEE_RATE = 0.001  # 0.10% per side; change if your fee differs
+if not BOT_TOKEN:
+    raise SystemExit(
+        "ERROR: TELEGRAM_BOT_TOKEN is not set.\n"
+        "Linux/macOS: export TELEGRAM_BOT_TOKEN='YOUR_TOKEN'\n"
+        "Windows PowerShell: $env:TELEGRAM_BOT_TOKEN='YOUR_TOKEN'"
+    )
 
-TIMEFRAME_WEIGHTS = {
-    "15m": 0.15,
-    "30m": 0.20,
-    "4h": 0.30,
-    "1d": 0.35,
-}
+# Conversation states
+COIN, CAPITAL, ENTRY = range(3)
 
-# Dark chart colors
-BG = "#080d16"
-PANEL = "#101827"
-GRID = "#263244"
-TEXT = "#f4f7fb"
-GREEN = "#18c964"
-RED = "#ff3b4d"
-BLUE = "#39a0ff"
-YELLOW = "#f4c542"
-ORANGE = "#ff9f1c"
-PURPLE = "#b36bff"
-CYAN = "#4dd9ff"
-GRAY = "#9aa6b2"
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        ["🔍 تحلیل ارز", "🔄 تحلیل مجدد"],
+        ["💰 سود / ضرر", "🎯 تغییر Entry"],
+        ["🛑 SL / TP", "ℹ️ راهنما"],
+    ],
+    resize_keyboard=True,
+)
+
+ENTRY_MENU = ReplyKeyboardMarkup(
+    [["📍 قیمت فعلی"], ["❌ لغو"]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
 
 # ------------------------------------------------------------
-# Helpers
+# BINANCE
 # ------------------------------------------------------------
-def normalize_symbol(symbol: str) -> str:
-    s = symbol.upper().strip().replace("/", "").replace("-", "").replace(" ", "")
+
+session_http = requests.Session()
+session_http.headers.update({"User-Agent": "SpotAnalyzerTelegram/1.0"})
+
+
+def normalize_symbol(value: str) -> str:
+    s = value.upper().strip().replace(" ", "").replace("-", "")
+    if "/" in s:
+        s = s.replace("/", "")
     if not s.endswith("USDT"):
         s += "USDT"
+    if not re.fullmatch(r"[A-Z0-9]{5,20}", s):
+        raise ValueError("نام ارز معتبر نیست.")
     return s
 
-def fmt_price(v: float) -> str:
-    if v >= 100:
-        return f"{v:,.2f}"
-    if v >= 1:
-        return f"{v:,.4f}"
-    if v >= 0.1:
-        return f"{v:.5f}"
-    if v >= 0.01:
-        return f"{v:.6f}"
-    if v >= 0.001:
-        return f"{v:.7f}"
-    return f"{v:.10f}"
 
-def pct(v: float) -> str:
-    return f"{v:+.2f}%"
-
-# ------------------------------------------------------------
-# Binance data
-# ------------------------------------------------------------
-def get_klines(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
-    symbol = normalize_symbol(symbol)
-    r = requests.get(
-        f"{BASE_URL}/klines",
-        params={"symbol": symbol, "interval": interval, "limit": limit},
-        timeout=20,
+def get_json(path, params=None, timeout=15):
+    r = session_http.get(
+        BINANCE_BASE + path,
+        params=params,
+        timeout=timeout,
     )
     r.raise_for_status()
-    raw = r.json()
-    if not isinstance(raw, list) or not raw:
-        raise RuntimeError(f"No candle data for {symbol} {interval}")
+    data = r.json()
+    if isinstance(data, dict) and "code" in data and data.get("code", 0) < 0:
+        raise ValueError(data.get("msg", "Binance API error"))
+    return data
+
+
+def get_klines(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
+    data = get_json(
+        "/api/v3/klines",
+        {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": min(limit, 1000),
+        },
+    )
+
+    if not data:
+        raise ValueError(f"No candle data for {symbol} {interval}")
 
     cols = [
         "open_time", "open", "high", "low", "close", "volume",
         "close_time", "quote_volume", "trades",
-        "taker_buy_base", "taker_buy_quote", "ignore"
+        "taker_base", "taker_quote", "ignore"
     ]
-    df = pd.DataFrame(raw, columns=cols)
-    for c in ["open", "high", "low", "close", "volume", "quote_volume"]:
+    df = pd.DataFrame(data, columns=cols)
+
+    for c in ["open", "high", "low", "close", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df["time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df = df[["time", "open", "high", "low", "close", "volume"]].copy()
     return df
 
-# ------------------------------------------------------------
-# Indicators
-# ------------------------------------------------------------
-def ema(s, n):
-    return s.ewm(span=n, adjust=False).mean()
 
-def rsi(s, n=14):
-    d = s.diff()
-    gain = d.clip(lower=0)
-    loss = -d.clip(upper=0)
-    ag = gain.ewm(alpha=1/n, adjust=False).mean()
-    al = loss.ewm(alpha=1/n, adjust=False).mean()
-    rs = ag / al.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+def get_price(symbol: str) -> float:
+    data = get_json("/api/v3/ticker/price", {"symbol": symbol})
+    return float(data["price"])
 
-def atr(df, n=14):
-    pc = df["close"].shift(1)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - pc).abs(),
-        (df["low"] - pc).abs(),
-    ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
-
-def add_indicators(df):
-    d = df.copy()
-    d["EMA20"] = ema(d["close"], 20)
-    d["EMA50"] = ema(d["close"], 50)
-    d["EMA200"] = ema(d["close"], 200)
-    d["RSI"] = rsi(d["close"], 14)
-    d["ATR"] = atr(d, 14)
-    d["VolumeMA"] = d["volume"].rolling(20).mean()
-    d["VolumeRatio"] = d["volume"] / d["VolumeMA"]
-    return d
 
 # ------------------------------------------------------------
-# Swings / structure / levels
+# INDICATORS
 # ------------------------------------------------------------
-def find_swings(df, window=3):
-    highs, lows = [], []
-    for i in range(window, len(df) - window):
-        h = float(df["high"].iloc[i])
-        l = float(df["low"].iloc[i])
-        if h >= df["high"].iloc[i-window:i].max() and h >= df["high"].iloc[i+1:i+window+1].max():
-            highs.append((i, h))
-        if l <= df["low"].iloc[i-window:i].min() and l <= df["low"].iloc[i+1:i+window+1].min():
-            lows.append((i, l))
-    return highs, lows
 
-def market_structure(df):
-    d = df.tail(140).reset_index(drop=True)
-    highs, lows = find_swings(d, 3)
-    hh = len(highs) >= 2 and highs[-1][1] > highs[-2][1]
-    hl = len(lows) >= 2 and lows[-1][1] > lows[-2][1]
-    lh = len(highs) >= 2 and highs[-1][1] < highs[-2][1]
-    ll = len(lows) >= 2 and lows[-1][1] < lows[-2][1]
-    if hh and hl:
-        return "HH / HL"
-    if lh and ll:
-        return "LH / LL"
-    return "MIXED"
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-def levels(df):
-    d = df.tail(160).reset_index(drop=True)
-    current = float(d["close"].iloc[-1])
-    highs, lows = find_swings(d, 3)
-    supports = [v for _, v in lows if v < current]
-    resistances = [v for _, v in highs if v > current]
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
 
-    if supports:
-        support = max(supports)
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out = 100 - (100 / (1 + rs))
+    return out.fillna(50)
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+    df["rsi"] = rsi(df["close"], 14)
+    df["atr"] = atr(df, 14)
+    df["vol_ma20"] = df["volume"].rolling(20).mean()
+    return df
+
+
+# ------------------------------------------------------------
+# SUPPORT / RESISTANCE / TREND
+# ------------------------------------------------------------
+
+def find_levels(df: pd.DataFrame):
+    recent = df.tail(120)
+
+    lows = recent["low"].nsmallest(12).values
+    highs = recent["high"].nlargest(12).values
+
+    support = float(np.median(lows))
+    resistance = float(np.median(highs))
+
+    current = float(df["close"].iloc[-1])
+
+    # Safety: make levels logically ordered around current price
+    below = recent.loc[recent["low"] < current, "low"]
+    above = recent.loc[recent["high"] > current, "high"]
+
+    if len(below):
+        support = float(below.quantile(0.20))
+    if len(above):
+        resistance = float(above.quantile(0.80))
+
+    if support >= current:
+        support = current * 0.96
+
+    if resistance <= current:
+        resistance = current * 1.06
+
+    return support, resistance
+
+
+def linear_trendline(df: pd.DataFrame, kind="low", window=80):
+    d = df.tail(window).reset_index(drop=True)
+
+    if kind == "low":
+        y = d["low"].values
     else:
-        support = float(d["low"].nsmallest(12).max())
+        y = d["high"].values
 
-    if resistances:
-        resistance = min(resistances)
-    else:
-        resistance = float(d["high"].nlargest(12).min())
+    x = np.arange(len(d))
 
-    return {
-        "support": support,
-        "resistance": resistance,
-        "major_low": float(d["low"].min()),
-        "major_high": float(d["high"].max()),
-    }
+    # Use regression on all recent values; robust enough for a visual trendline.
+    slope, intercept = np.polyfit(x, y, 1)
+    line = slope * x + intercept
 
-def trendlines(df):
-    d = df.tail(160).reset_index(drop=True)
-    highs, lows = find_swings(d, 3)
-    out = {"down": None, "up": None}
+    return d, line, slope
 
-    if len(highs) >= 2:
-        x1, y1 = highs[-2]
-        x2, y2 = highs[-1]
-        if x2 != x1:
-            m = (y2 - y1) / (x2 - x1)
-            out["down"] = (m, y1 - m*x1)
-
-    if len(lows) >= 2:
-        x1, y1 = lows[-2]
-        x2, y2 = lows[-1]
-        if x2 != x1:
-            m = (y2 - y1) / (x2 - x1)
-            out["up"] = (m, y1 - m*x1)
-    return out
 
 # ------------------------------------------------------------
-# Timeframe score
+# TIMEFRAME ANALYSIS
 # ------------------------------------------------------------
-def analyze_tf(raw, tf):
-    d = add_indicators(raw)
-    current = float(d["close"].iloc[-1])
-    e20 = float(d["EMA20"].iloc[-1])
-    e50 = float(d["EMA50"].iloc[-1])
-    e200 = float(d["EMA200"].iloc[-1])
-    rv = float(d["RSI"].iloc[-1])
-    av = float(d["ATR"].iloc[-1])
-    vr = float(d["VolumeRatio"].iloc[-1])
-    lv = levels(d)
-    struct = market_structure(d)
-    tls = trendlines(d)
 
-    score = 50
-    reasons = []
+def analyze_timeframe(symbol: str, interval: str):
+    df = add_indicators(get_klines(symbol, interval, 300))
 
-    if current > e20:
-        score += 5; reasons.append("Price > EMA20")
+    close = float(df["close"].iloc[-1])
+    e20 = float(df["ema20"].iloc[-1])
+    e50 = float(df["ema50"].iloc[-1])
+    e200 = float(df["ema200"].iloc[-1])
+    rv = float(df["rsi"].iloc[-1])
+    volume = float(df["volume"].iloc[-1])
+    volume_ma = float(df["vol_ma20"].iloc[-1]) if pd.notna(df["vol_ma20"].iloc[-1]) else volume
+
+    support, resistance = find_levels(df)
+
+    score = 50.0
+
+    # EMA structure
+    if close > e20:
+        score += 7
     else:
-        score -= 5; reasons.append("Price < EMA20")
+        score -= 7
 
     if e20 > e50:
-        score += 8; reasons.append("EMA20 > EMA50")
+        score += 8
     else:
-        score -= 8; reasons.append("EMA20 < EMA50")
+        score -= 8
 
-    if current > e200:
-        score += 8; reasons.append("Price > EMA200")
+    if e50 > e200:
+        score += 10
     else:
-        score -= 8; reasons.append("Price < EMA200")
-
-    if 50 <= rv <= 65:
-        score += 8; reasons.append("Healthy RSI")
-    elif 65 < rv <= 72:
-        score += 3; reasons.append("Strong RSI")
-    elif rv > 72:
-        score -= 8; reasons.append("Overbought RSI")
-    elif 30 <= rv < 40:
-        score -= 5; reasons.append("Weak RSI")
-    elif rv < 30:
-        score += 3; reasons.append("Oversold RSI")
-
-    if vr >= 1.50:
-        score += 8; reasons.append("Very high volume")
-    elif vr >= 1.20:
-        score += 5; reasons.append("High volume")
-    elif vr < 0.70:
-        score -= 5; reasons.append("Low volume")
-
-    if struct == "HH / HL":
-        score += 10; reasons.append("Bullish structure")
-    elif struct == "LH / LL":
-        score -= 10; reasons.append("Bearish structure")
-
-    sd = (current - lv["support"]) / current * 100
-    rd = (lv["resistance"] - current) / current * 100
-
-    if 0 <= sd <= 2.5:
-        score += 5; reasons.append("Near support")
-    if 0 <= rd <= 2.5:
-        score -= 4; reasons.append("Near resistance")
-
-    prev = float(d["close"].iloc[-2])
-    breakout = "NONE"
-    if prev <= lv["resistance"] and current > lv["resistance"]:
-        breakout = "BULLISH BREAKOUT"
-        if vr >= 1.20:
-            score += 10; reasons.append("Breakout + volume")
-    elif prev >= lv["support"] and current < lv["support"]:
-        breakout = "BEARISH BREAKDOWN"
-        if vr >= 1.20:
-            score -= 10; reasons.append("Breakdown + volume")
-
-    score = max(0, min(100, score))
-    if score >= 80:
-        signal = "STRONG BUY"
-    elif score >= 70:
-        signal = "BUY"
-    elif score >= 60:
-        signal = "BUY CONFIRMATION"
-    elif score >= 45:
-        signal = "WAIT"
-    elif score >= 35:
-        signal = "WEAK SELL"
-    else:
-        signal = "SELL"
-
-    return {
-        "df": d, "timeframe": tf, "price": current,
-        "ema20": e20, "ema50": e50, "ema200": e200,
-        "rsi": rv, "atr": av, "volume_ratio": vr,
-        "support": lv["support"], "resistance": lv["resistance"],
-        "major_low": lv["major_low"], "major_high": lv["major_high"],
-        "structure": struct, "breakout": breakout,
-        "trendlines": tls, "score": float(score),
-        "signal": signal, "reasons": reasons,
-    }
-
-def analyze_btc():
-    a4 = analyze_tf(get_klines("BTCUSDT", "4h", 300), "4h")
-    a1 = analyze_tf(get_klines("BTCUSDT", "1d", 300), "1d")
-    score = round(a4["score"]*0.45 + a1["score"]*0.55, 1)
-    if score >= 75: state = "BULLISH"
-    elif score >= 60: state = "NEUTRAL-BULLISH"
-    elif score >= 45: state = "NEUTRAL"
-    elif score >= 30: state = "BEARISH"
-    else: state = "STRONG BEARISH"
-    return {"score": score, "state": state, "4h": a4, "1d": a1}
-
-# ------------------------------------------------------------
-# Final score
-# ------------------------------------------------------------
-def final_score(analyses, btc):
-    coin = sum(analyses[tf]["score"] * w for tf, w in TIMEFRAME_WEIGHTS.items())
-    adj = 0
-    if btc["score"] >= 75: adj = 5
-    elif btc["score"] >= 65: adj = 3
-    elif btc["score"] < 35: adj = -8
-    elif btc["score"] < 45: adj = -5
-    elif btc["score"] < 55: adj = -2
-    score = round(max(0, min(100, coin + adj)), 1)
-
-    if score >= 80: decision = "STRONG BUY"
-    elif score >= 70: decision = "BUY"
-    elif score >= 60: decision = "BUY ON CONFIRMATION"
-    elif score >= 45: decision = "WAIT"
-    elif score >= 35: decision = "WEAK SELL"
-    else: decision = "SELL"
-    return score, decision
-
-# ------------------------------------------------------------
-# Trade plan
-# ------------------------------------------------------------
-def trade_plan(df, entry, support, resistance, capital):
-    d = add_indicators(df)
-    a = float(d["ATR"].iloc[-1])
-    if not np.isfinite(a) or a <= 0:
-        a = entry * 0.02
-
-    stop = min(support * 0.985, entry - 1.5*a)
-    if stop >= entry:
-        stop = entry * 0.97
-
-    risk = entry - stop
-    if risk <= 0:
-        risk = entry * 0.03
-        stop = entry - risk
-
-    tp1 = resistance if resistance > entry else entry + 1.5*risk
-    if tp1 - entry < 1.2*risk:
-        tp1 = entry + 1.5*risk
-    tp2 = max(tp1 + risk, entry + 2.5*risk)
-    tp3 = max(tp2 + risk, entry + 4.0*risk)
-
-    qty = capital / entry
-
-    def pnl(price):
-        buy = qty * entry
-        sell = qty * price
-        profit = sell - sell*FEE_RATE - buy - buy*FEE_RATE
-        return profit, profit/capital*100
-
-    sl_p, sl_pct = pnl(stop)
-    p1, p1pct = pnl(tp1)
-    p2, p2pct = pnl(tp2)
-    p3, p3pct = pnl(tp3)
-
-    rr = (tp3 - entry) / risk
-
-    return {
-        "entry": entry, "stop": stop, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-        "quantity": qty, "risk": risk, "rr": rr,
-        "sl_profit": sl_p, "sl_percent": sl_pct,
-        "tp1_profit": p1, "tp1_percent": p1pct,
-        "tp2_profit": p2, "tp2_percent": p2pct,
-        "tp3_profit": p3, "tp3_percent": p3pct,
-    }
-
-# ------------------------------------------------------------
-# Chart drawing
-# ------------------------------------------------------------
-def draw_candles(ax, df):
-    for i in range(len(df)):
-        o = float(df["open"].iloc[i])
-        h = float(df["high"].iloc[i])
-        l = float(df["low"].iloc[i])
-        c = float(df["close"].iloc[i])
-        color = GREEN if c >= o else RED
-        ax.plot([i, i], [l, h], color=color, linewidth=1)
-        body_low = min(o, c)
-        body_h = max(abs(c-o), h*0.00005)
-        ax.add_patch(Rectangle(
-            (i-0.32, body_low), 0.64, body_h,
-            facecolor=color, edgecolor=color, linewidth=0.4
-        ))
-
-def hline(ax, price, label, color, style="--", lw=1.5):
-    ax.axhline(price, color=color, linestyle=style, linewidth=lw, alpha=0.9)
-    ax.text(
-        1.002, price, f" {label} {fmt_price(price)}",
-        transform=ax.get_yaxis_transform(), color=color,
-        fontsize=9, va="center", fontweight="bold"
-    )
-
-def trendline(ax, line, n, color, label):
-    if line is None:
-        return
-    m, b = line
-    x = np.array([0, n-1])
-    y = m*x+b
-    ax.plot(x, y, color=color, linewidth=2, alpha=0.85)
-    mid = n*0.55
-    ax.text(mid, m*mid+b, label, color=color, fontsize=9, fontweight="bold")
-
-def panel(fig, rect, title, lines, edge, title_size=11, line_size=8.5):
-    ax = fig.add_axes(rect)
-    ax.set_facecolor(PANEL)
-    for s in ax.spines.values():
-        s.set_edgecolor(edge)
-        s.set_linewidth(1.3)
-    ax.set_xticks([]); ax.set_yticks([])
-    ax.text(0.04, 0.88, title, color=edge, fontsize=title_size, fontweight="bold", va="top")
-    y = 0.68
-    for line in lines:
-        ax.text(0.04, y, line, color=TEXT, fontsize=line_size, va="top")
-        y -= 0.16
-    return ax
-
-def draw_price_table(ax, plan, capital):
-    rows = [
-        ("Stop Loss", plan["stop"], plan["sl_profit"], plan["sl_percent"]),
-        ("Entry", plan["entry"], 0.0, 0.0),
-        ("TP1", plan["tp1"], plan["tp1_profit"], plan["tp1_percent"]),
-        ("TP2", plan["tp2"], plan["tp2_profit"], plan["tp2_percent"]),
-        ("TP3", plan["tp3"], plan["tp3_profit"], plan["tp3_percent"]),
-    ]
-    ax.axis("off")
-    ax.set_facecolor(PANEL)
-    ax.text(0.5, 1.04, fa(f"سود و ضرر احتمالی با سرمایه ${capital:,.0f}"),
-            ha="center", color=TEXT, fontsize=11, fontweight="bold")
-    headers = ["Level", "Price", "P/L USD", "P/L %"]
-    table = ax.table(
-        cellText=[[r[0], fmt_price(r[1]), f"{r[2]:+,.2f}", f"{r[3]:+.2f}%"] for r in rows],
-        colLabels=headers, cellLoc="center", colLoc="center", loc="upper center",
-        bbox=[0.01, 0.02, 0.98, 0.88]
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8.5)
-    for (row, col), cell in table.get_celld().items():
-        cell.set_facecolor(PANEL)
-        cell.set_edgecolor(GRID)
-        cell.get_text().set_color(TEXT)
-        if row == 0:
-            cell.get_text().set_weight("bold")
-        if row > 0 and col in (2, 3):
-            val = rows[row-1][2]
-            cell.get_text().set_color(RED if val < 0 else GREEN if val > 0 else TEXT)
-
-def generate_chart(symbol, analyses, btc, plan, score, decision, capital, out_file=None):
-    main = analyses["4h"]
-    df = main["df"].tail(105).reset_index(drop=True)
-
-    if out_file is None:
-        out_file = f"{symbol.replace('USDT','')}_FINAL_ANALYSIS.png"
-
-    fig = plt.figure(figsize=(18, 13), facecolor=BG)
-
-    # Main chart
-    ax = fig.add_axes([0.055, 0.405, 0.89, 0.49])
-    ax.set_facecolor(BG)
-    draw_candles(ax, df)
-
-    ax.plot(df.index, df["EMA20"], color=YELLOW, linewidth=1.1, label="EMA20")
-    ax.plot(df.index, df["EMA50"], color=BLUE, linewidth=1.1, label="EMA50")
-    ax.plot(df.index, df["EMA200"], color=PURPLE, linewidth=1.1, label="EMA200")
-
-    # Strong zones
-    sr = main["resistance"]
-    sup = main["support"]
-    ax.axhspan(sr*0.992, sr*1.008, color=RED, alpha=0.10)
-    ax.axhspan(sup*0.992, sup*1.008, color=GREEN, alpha=0.08)
-
-    hline(ax, sr, "RESISTANCE", RED, "-", 1.8)
-    hline(ax, sup, "SUPPORT", GREEN, "-", 1.8)
-    hline(ax, plan["entry"], "ENTRY", ORANGE, "--", 2.0)
-    hline(ax, plan["stop"], "STOP LOSS", RED, "--", 2.0)
-    hline(ax, plan["tp1"], "TP1", GREEN, ":", 1.7)
-    hline(ax, plan["tp2"], "TP2", GREEN, ":", 1.7)
-    hline(ax, plan["tp3"], "TP3", GREEN, ":", 1.7)
-
-    trendline(ax, main["trendlines"]["down"], len(df), YELLOW, fa("خط روند نزولی"))
-    trendline(ax, main["trendlines"]["up"], len(df), BLUE, fa("خط روند صعودی"))
-
-    # Breakout arrow / projected path
-    breakout = sr
-    x0 = len(df) - 12
-    x1 = len(df) + 4
-    x2 = len(df) + 15
-    x3 = len(df) + 27
-    y0 = plan["entry"]
-    ax.annotate("", xy=(x1, breakout*1.02), xytext=(x0, y0),
-                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
-    ax.annotate("", xy=(x2, plan["tp1"]), xytext=(x1, breakout*1.02),
-                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
-    ax.annotate("", xy=(x3, plan["tp2"]), xytext=(x2, plan["tp1"]),
-                arrowprops=dict(arrowstyle="->", color=GREEN, lw=2.2))
-    ax.text(x0+3, breakout, fa("Breakout Level"), color=ORANGE, fontsize=9, fontweight="bold")
-
-    # Bearish path
-    ax.annotate("", xy=(x2, plan["stop"]), xytext=(x0, y0),
-                arrowprops=dict(arrowstyle="->", color=RED, lw=1.8, linestyle="--"))
-
-    # Title
-    current = main["price"]
-    ax.set_title(
-        fa(f"{symbol} • 4H • BINANCE\n"
-           f"قیمت {fmt_price(current)}   |   امتیاز نهایی {score:.0f}/100   |   {decision}"),
-        color=TEXT, fontsize=16, fontweight="bold", pad=12
-    )
-    ax.grid(color=GRID, alpha=0.30)
-    ax.tick_params(colors=TEXT, labelsize=8)
-    for s in ax.spines.values():
-        s.set_color(GRID)
+        score -= 10
 
     # RSI
-    ar = fig.add_axes([0.055, 0.275, 0.89, 0.09])
-    ar.set_facecolor(BG)
-    ar.plot(df.index, df["RSI"], color=PURPLE, linewidth=1.7)
-    ar.axhline(70, color=RED, linestyle="--", alpha=0.45)
-    ar.axhline(50, color=YELLOW, linestyle="--", alpha=0.35)
-    ar.axhline(30, color=GREEN, linestyle="--", alpha=0.45)
-    ar.set_ylim(0, 100)
-    ar.set_ylabel("RSI", color=TEXT)
-    ar.tick_params(colors=TEXT, labelsize=8)
-    ar.grid(color=GRID, alpha=0.25)
-    ar.text(len(df)-16, float(df["RSI"].iloc[-1])+3,
-            fa(f"RSI = {df['RSI'].iloc[-1]:.1f}"), color=PURPLE, fontsize=9, fontweight="bold")
+    if 50 <= rv <= 68:
+        score += 8
+    elif 42 <= rv < 50:
+        score += 2
+    elif rv > 72:
+        score -= 5
+    elif rv < 35:
+        score -= 5
+    else:
+        score -= 2
 
-    # Volume
-    av = fig.add_axes([0.055, 0.16, 0.89, 0.08])
-    av.set_facecolor(BG)
-    for i in range(len(df)):
-        c = GREEN if df["close"].iloc[i] >= df["open"].iloc[i] else RED
-        av.bar(i, df["volume"].iloc[i], color=c, width=0.65, alpha=0.75)
-    av.plot(df.index, df["VolumeMA"], color=YELLOW, linewidth=1.1)
-    av.tick_params(colors=TEXT, labelsize=8)
-    av.set_ylabel("VOL", color=TEXT)
-    av.grid(color=GRID, alpha=0.25)
+    # Volume confirmation
+    if volume_ma > 0:
+        vr = volume / volume_ma
+        if vr >= 1.5:
+            score += 7
+        elif vr >= 1.0:
+            score += 3
+        else:
+            score -= 3
 
-    # Panels
-    tf_lines = []
-    for tf in ["15m", "30m", "4h", "1d"]:
-        a = analyses[tf]
-        tf_lines.append(f"{tf:>3}   {a['score']:.0f}/100   {a['signal']}")
-    tf_lines.append(f"BTC FILTER   {btc['score']:.0f}/100")
-    tf_lines.append(f"FINAL         {score:.0f}/100")
-    panel(fig, [0.055, 0.035, 0.245, 0.105], fa("امتیاز تایم‌فریم‌ها"), tf_lines, BLUE)
+    # Price location
+    if close > resistance:
+        score += 8
+        structure = "BREAKOUT"
+    elif close >= support * 1.015:
+        structure = "RANGE / MID"
+    else:
+        score -= 3
+        structure = "NEAR SUPPORT"
 
-    buy_lines = [
-        fa(f"• تثبیت بالای {fmt_price(sr)}"),
-        fa(f"• هدف 1: {fmt_price(plan['tp1'])}"),
-        fa(f"• هدف 2: {fmt_price(plan['tp2'])}"),
-        fa(f"• هدف 3: {fmt_price(plan['tp3'])}"),
-        fa("• تأیید حجم و ساختار صعودی"),
-    ]
-    panel(fig, [0.315, 0.035, 0.245, 0.105], fa("سناریوی خرید (صعودی)"), buy_lines, GREEN)
+    score = float(np.clip(score, 0, 100))
 
-    sell_lines = [
-        fa(f"• عدم شکست {fmt_price(sr)}"),
-        fa(f"• شکست حمایت {fmt_price(sup)}"),
-        fa(f"• حد ضرر: {fmt_price(plan['stop'])}"),
-        fa("• ضعف حجم / ساختار نزولی"),
-        fa("• در صورت شکست حمایت، خروج"),
-    ]
-    panel(fig, [0.575, 0.035, 0.245, 0.105], fa("سناریوی فروش / ریسک (نزولی)"), sell_lines, RED)
+    if score >= 70:
+        signal = "BUY"
+    elif score >= 58:
+        signal = "BUY CONFIRMATION"
+    elif score <= 38:
+        signal = "SELL / AVOID"
+    else:
+        signal = "WAIT"
 
-    money_lines = [
-        f"ENTRY: {fmt_price(plan['entry'])}",
-        f"STOP:  {fmt_price(plan['stop'])}",
-        f"TP1:   {fmt_price(plan['tp1'])}",
-        f"TP2:   {fmt_price(plan['tp2'])}",
-        f"TP3:   {fmt_price(plan['tp3'])}",
-        f"R/R:   1:{plan['rr']:.2f}",
-    ]
-    panel(fig, [0.835, 0.035, 0.11, 0.105], "TRADE PLAN", money_lines, ORANGE, line_size=7.5)
+    return {
+        "df": df,
+        "close": close,
+        "ema20": e20,
+        "ema50": e50,
+        "ema200": e200,
+        "rsi": rv,
+        "volume": volume,
+        "volume_ma": volume_ma,
+        "support": support,
+        "resistance": resistance,
+        "score": score,
+        "signal": signal,
+        "structure": structure,
+    }
 
-    # P/L table in a separate axis above panels
-    tab_ax = fig.add_axes([0.315, 0.005, 0.47, 0.025])
-    draw_price_table(tab_ax, plan, capital)
 
-    # Small money / BTC box
-    fig.text(
-        0.79, 0.145,
-        fa(f"سرمایه: ${capital:,.0f}\n"
-           f"تعداد تقریبی: {plan['quantity']:,.0f}\n"
-           f"BTC: {btc['state']} ({btc['score']:.0f}/100)"),
-        color=TEXT, fontsize=9, va="top",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor=PANEL, edgecolor=ORANGE)
+def analyze_btc():
+    analyses = {}
+
+    for tf in ["4h", "1d"]:
+        analyses[tf] = analyze_timeframe("BTCUSDT", tf)
+
+    score = analyses["4h"]["score"] * 0.55 + analyses["1d"]["score"] * 0.45
+
+    if score >= 70:
+        state = "BULLISH"
+    elif score >= 55:
+        state = "NEUTRAL-BULLISH"
+    elif score >= 45:
+        state = "NEUTRAL"
+    elif score >= 30:
+        state = "NEUTRAL-BEARISH"
+    else:
+        state = "BEARISH"
+
+    return {
+        "score": float(score),
+        "state": state,
+        "4h": analyses["4h"],
+        "1d": analyses["1d"],
+    }
+
+
+# ------------------------------------------------------------
+# FINAL SCORE
+# ------------------------------------------------------------
+
+def final_score(tf):
+    # Higher timeframes receive more weight.
+    score = (
+        tf["15m"]["score"] * 0.15
+        + tf["30m"]["score"] * 0.20
+        + tf["4h"]["score"] * 0.35
+        + tf["1d"]["score"] * 0.30
     )
 
-    plt.savefig(out_file, dpi=180, facecolor=BG, bbox_inches="tight")
-    plt.close(fig)
-    return out_file
+    if score >= 72:
+        decision = "STRONG BUY"
+    elif score >= 62:
+        decision = "BUY"
+    elif score >= 55:
+        decision = "BUY ON CONFIRMATION"
+    elif score <= 38:
+        decision = "SELL / AVOID"
+    else:
+        decision = "WAIT"
+
+    return float(score), decision
+
 
 # ------------------------------------------------------------
-# Console report
+# TRADE PLAN
 # ------------------------------------------------------------
-def print_report(symbol, capital, analyses, btc, score, decision, plan, image_path):
-    print("\n" + "="*76)
-    print(f"{symbol} / SPOT FINAL ANALYSIS")
-    print("="*76)
-    print(f"FINAL SCORE : {score:.0f}/100")
-    print(f"DECISION    : {decision}")
-    print(f"BTC FILTER  : {btc['score']:.0f}/100 - {btc['state']}")
-    print("-"*76)
 
-    for tf in ["15m", "30m", "4h", "1d"]:
-        a = analyses[tf]
-        print(
-            f"{tf:>3} | Score {a['score']:>5.1f} | RSI {a['rsi']:>5.1f} | "
-            f"Vol {a['volume_ratio']:>4.2f}x | {a['structure']:<8} | {a['signal']}"
+def make_trade_plan(entry, support, resistance, capital, atr_value):
+    entry = float(entry)
+    support = float(support)
+    resistance = float(resistance)
+    atr_value = max(float(atr_value), entry * 0.01)
+
+    # Stop below support, with ATR buffer.
+    stop = min(
+        support - atr_value * 0.35,
+        entry - atr_value * 0.80,
+    )
+
+    # Never create an invalid stop.
+    if stop <= 0 or stop >= entry:
+        stop = entry * 0.92
+
+    risk = entry - stop
+
+    # Target 1 is normally resistance / minimum 1R.
+    tp1 = max(resistance, entry + risk * 1.0)
+    tp2 = max(entry + risk * 2.0, tp1 * 1.12)
+    tp3 = max(entry + risk * 3.0, tp2 * 1.12)
+
+    quantity = capital / entry
+
+    def pnl(target):
+        dollars = quantity * (target - entry)
+        pct = (target / entry - 1) * 100
+        return dollars, pct
+
+    sl_dollars, sl_pct = pnl(stop)
+    tp1_dollars, tp1_pct = pnl(tp1)
+    tp2_dollars, tp2_pct = pnl(tp2)
+    tp3_dollars, tp3_pct = pnl(tp3)
+
+    rr = (tp2 - entry) / risk if risk > 0 else 0
+
+    return {
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "quantity": quantity,
+        "sl_profit": sl_dollars,
+        "sl_percent": sl_pct,
+        "tp1_profit": tp1_dollars,
+        "tp1_percent": tp1_pct,
+        "tp2_profit": tp2_dollars,
+        "tp2_percent": tp2_pct,
+        "tp3_profit": tp3_dollars,
+        "tp3_percent": tp3_pct,
+        "rr": rr,
+    }
+
+
+# ------------------------------------------------------------
+# PRICE FORMAT
+# ------------------------------------------------------------
+
+def fmt_price(x):
+    x = float(x)
+
+    if x >= 1000:
+        return f"{x:,.2f}"
+    if x >= 1:
+        return f"{x:,.4f}"
+    if x >= 0.1:
+        return f"{x:.5f}"
+    if x >= 0.01:
+        return f"{x:.5f}"
+    if x >= 0.001:
+        return f"{x:.6f}"
+    if x >= 0.0001:
+        return f"{x:.7f}"
+
+    return f"{x:.10f}".rstrip("0")
+
+
+# ------------------------------------------------------------
+# CHART
+# ------------------------------------------------------------
+
+def make_chart(symbol, analyses, btc, plan, score, decision, capital, output):
+    df = analyses["4h"]["df"].tail(140).copy()
+    support = analyses["4h"]["support"]
+    resistance = analyses["4h"]["resistance"]
+
+    fig = plt.figure(figsize=(18, 11), facecolor="#071018")
+
+    gs = fig.add_gridspec(
+        4, 1,
+        height_ratios=[5.8, 1.5, 1.4, 2.3],
+        hspace=0.12
+    )
+
+    ax = fig.add_subplot(gs[0])
+    ax_rsi = fig.add_subplot(gs[1], sharex=ax)
+    ax_vol = fig.add_subplot(gs[2], sharex=ax)
+    ax_info = fig.add_subplot(gs[3])
+
+    for a in [ax, ax_rsi, ax_vol, ax_info]:
+        a.set_facecolor("#071018")
+        for sp in a.spines.values():
+            sp.set_color("#33404d")
+
+    # Candles
+    x = np.arange(len(df))
+    width = 0.62
+
+    for i, row in enumerate(df.itertuples()):
+        up = row.close >= row.open
+        body_low = min(row.open, row.close)
+        body_h = max(abs(row.close - row.open), row.close * 0.0002)
+
+        color = "#16c784" if up else "#ea3943"
+
+        ax.vlines(
+            i,
+            row.low,
+            row.high,
+            color=color,
+            linewidth=0.8,
+            alpha=0.9,
         )
 
-    print("-"*76)
-    print(f"ENTRY       : {fmt_price(plan['entry'])}")
-    print(f"STOP LOSS   : {fmt_price(plan['stop'])}")
-    print(f"TP1         : {fmt_price(plan['tp1'])}")
-    print(f"TP2         : {fmt_price(plan['tp2'])}")
-    print(f"TP3         : {fmt_price(plan['tp3'])}")
-    print(f"QUANTITY    : {plan['quantity']:,.6f}")
-    print(f"RISK/REWARD : 1:{plan['rr']:.2f}")
-    print("-"*76)
-    print(f"SL  P/L     : ${plan['sl_profit']:+,.2f} ({plan['sl_percent']:+.2f}%)")
-    print(f"TP1 P/L     : ${plan['tp1_profit']:+,.2f} ({plan['tp1_percent']:+.2f}%)")
-    print(f"TP2 P/L     : ${plan['tp2_profit']:+,.2f} ({plan['tp2_percent']:+.2f}%)")
-    print(f"TP3 P/L     : ${plan['tp3_profit']:+,.2f} ({plan['tp3_percent']:+.2f}%)")
-    print("-"*76)
-    print(f"IMAGE       : {os.path.abspath(image_path)}")
-    print("="*76)
+        rect = Rectangle(
+            (i - width / 2, body_low),
+            width,
+            body_h,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.5,
+        )
+        ax.add_patch(rect)
+
+    # EMA
+    ax.plot(x, df["ema20"], color="#f2c94c", linewidth=1.3, label="EMA20")
+    ax.plot(x, df["ema50"], color="#56ccf2", linewidth=1.2, label="EMA50")
+    ax.plot(x, df["ema200"], color="#bb86fc", linewidth=1.1, label="EMA200")
+
+    # Support / Resistance
+    ax.axhline(
+        resistance,
+        color="#ff5252",
+        linestyle="--",
+        linewidth=1.6,
+    )
+    ax.axhline(
+        support,
+        color="#00e676",
+        linestyle="--",
+        linewidth=1.6,
+    )
+
+    ax.text(
+        len(df) - 1,
+        resistance,
+        f"  Resistance {fmt_price(resistance)}",
+        color="#ff7070",
+        va="bottom",
+        ha="right",
+        fontsize=9,
+    )
+
+    ax.text(
+        len(df) - 1,
+        support,
+        f"  Support {fmt_price(support)}",
+        color="#62e89a",
+        va="top",
+        ha="right",
+        fontsize=9,
+    )
+
+    # Trendline approximation
+    d2, line_low, slope_low = linear_trendline(df, "low", min(80, len(df)))
+    start = len(df) - len(d2)
+    ax.plot(
+        np.arange(start, len(df)),
+        line_low,
+        color="#00b0ff",
+        linewidth=1.5,
+        alpha=0.9,
+    )
+
+    d3, line_high, slope_high = linear_trendline(df, "high", min(80, len(df)))
+    ax.plot(
+        np.arange(start, len(df)),
+        line_high,
+        color="#ffd740",
+        linewidth=1.5,
+        alpha=0.9,
+    )
+
+    # Trade levels
+    levels = [
+        (plan["entry"], "#ff9800", "ENTRY"),
+        (plan["stop"], "#ff1744", "STOP LOSS"),
+        (plan["tp1"], "#00e676", "TP1"),
+        (plan["tp2"], "#00e676", "TP2"),
+        (plan["tp3"], "#00e676", "TP3"),
+    ]
+
+    for level, color, label in levels:
+        ax.axhline(
+            level,
+            color=color,
+            linestyle=":",
+            linewidth=1.4,
+        )
+        ax.text(
+            len(df) - 1,
+            level,
+            f"  {label} {fmt_price(level)}",
+            color=color,
+            fontsize=9,
+            va="center",
+            ha="right",
+            bbox=dict(
+                boxstyle="round,pad=0.15",
+                facecolor="#071018",
+                edgecolor=color,
+                alpha=0.9,
+            ),
+        )
+
+    # Current price marker
+    current = float(df["close"].iloc[-1])
+    ax.scatter(
+        len(df) - 1,
+        current,
+        s=45,
+        color="#ffffff",
+        zorder=10,
+    )
+
+    ax.set_title(
+        f"{symbol} / USDT   •   4H   •   BINANCE",
+        color="white",
+        fontsize=15,
+        loc="left",
+        pad=10,
+        fontweight="bold",
+    )
+
+    ax.text(
+        0.01,
+        0.96,
+        f"Score: {score:.0f}/100   |   {decision}",
+        transform=ax.transAxes,
+        color="#ffd740",
+        fontsize=11,
+        va="top",
+        bbox=dict(
+            boxstyle="round,pad=0.35",
+            facecolor="#111b25",
+            edgecolor="#ffd740",
+        ),
+    )
+
+    ax.grid(alpha=0.10)
+    ax.tick_params(colors="#b8c4d0", labelsize=8)
+    ax.legend(
+        loc="upper left",
+        fontsize=8,
+        facecolor="#101a23",
+        edgecolor="#33404d",
+        labelcolor="white",
+    )
+
+    # RSI
+    rsi_values = df["rsi"]
+    ax_rsi.plot(x, rsi_values, color="#b388ff", linewidth=1.5)
+    ax_rsi.axhline(70, color="#ff5252", linestyle="--", alpha=0.6)
+    ax_rsi.axhline(50, color="#888888", linestyle="--", alpha=0.5)
+    ax_rsi.axhline(30, color="#00e676", linestyle="--", alpha=0.6)
+    ax_rsi.set_ylim(0, 100)
+    ax_rsi.set_ylabel("RSI", color="#b8c4d0")
+    ax_rsi.tick_params(colors="#b8c4d0", labelsize=8)
+    ax_rsi.grid(alpha=0.08)
+
+    # Volume
+    vol_colors = np.where(
+        df["close"] >= df["open"],
+        "#16c784",
+        "#ea3943",
+    )
+    ax_vol.bar(
+        x,
+        df["volume"],
+        color=vol_colors,
+        width=0.65,
+        alpha=0.85,
+    )
+    ax_vol.plot(
+        x,
+        df["vol_ma20"],
+        color="#ffd740",
+        linewidth=1.0,
+    )
+    ax_vol.set_ylabel("Volume", color="#b8c4d0")
+    ax_vol.tick_params(colors="#b8c4d0", labelsize=8)
+    ax_vol.grid(alpha=0.08)
+
+    # Bottom information cards
+    ax_info.axis("off")
+
+    def card(x0, y0, w, h, title, lines, edge):
+        ax_info.text(
+            x0,
+            y0 + h,
+            title,
+            transform=ax_info.transAxes,
+            color=edge,
+            fontsize=11,
+            fontweight="bold",
+            va="top",
+        )
+
+        text = "\n".join(lines)
+        ax_info.text(
+            x0,
+            y0 + h - 0.12,
+            text,
+            transform=ax_info.transAxes,
+            color="#dce5ee",
+            fontsize=9,
+            va="top",
+            linespacing=1.55,
+            bbox=dict(
+                boxstyle="round,pad=0.65",
+                facecolor="#0c1721",
+                edgecolor=edge,
+                linewidth=1.0,
+            ),
+        )
+
+    card(
+        0.01, 0.08, 0.30, 0.80,
+        "TIMEFRAME SCORE",
+        [
+            f"15m  {analyses['15m']['score']:.0f}/100  {analyses['15m']['signal']}",
+            f"30m  {analyses['30m']['score']:.0f}/100  {analyses['30m']['signal']}",
+            f"4H   {analyses['4h']['score']:.0f}/100  {analyses['4h']['signal']}",
+            f"1D   {analyses['1d']['score']:.0f}/100  {analyses['1d']['signal']}",
+            f"BTC  {btc['score']:.0f}/100  {btc['state']}",
+        ],
+        "#00e676",
+    )
+
+    card(
+        0.345, 0.08, 0.30, 0.80,
+        "TRADE PLAN",
+        [
+            f"ENTRY   {fmt_price(plan['entry'])}",
+            f"STOP    {fmt_price(plan['stop'])}",
+            f"TP1     {fmt_price(plan['tp1'])}",
+            f"TP2     {fmt_price(plan['tp2'])}",
+            f"TP3     {fmt_price(plan['tp3'])}",
+            f"R/R     1 : {plan['rr']:.2f}",
+        ],
+        "#ff9800",
+    )
+
+    card(
+        0.68, 0.08, 0.30, 0.80,
+        f"CAPITAL ${capital:,.0f}",
+        [
+            f"Quantity {plan['quantity']:,.2f}",
+            f"SL   ${plan['sl_profit']:+,.2f}",
+            f"TP1  ${plan['tp1_profit']:+,.2f}",
+            f"TP2  ${plan['tp2_profit']:+,.2f}",
+            f"TP3  ${plan['tp3_profit']:+,.2f}",
+        ],
+        "#42a5f5",
+    )
+
+    plt.setp(ax.get_xticklabels(), visible=False)
+    plt.setp(ax_rsi.get_xticklabels(), visible=False)
+
+    fig.text(
+        0.5,
+        0.985,
+        "AUTOMATIC SPOT ANALYSIS • FOR DECISION SUPPORT",
+        color="#ffd740",
+        ha="center",
+        va="top",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    fig.savefig(
+        output,
+        dpi=150,
+        facecolor=fig.get_facecolor(),
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
 
 # ------------------------------------------------------------
-# Main
+# FULL ANALYSIS
 # ------------------------------------------------------------
-def main():
-    print("\n" + "="*76)
-    print("UNIVERSAL SPOT ANALYZER - FINAL VISUAL")
-    print("15m + 30m + 4H + 1D + BTC + AUTOMATIC PNG")
-    print("="*76)
 
-    symbol = normalize_symbol(input("نام ارز: ").strip())
+def run_analysis(symbol, capital, entry):
+    tf = {}
 
-    while True:
-        try:
-            capital = float(input("سرمایه به دلار: ").strip())
-            if capital <= 0:
-                raise ValueError
-            break
-        except ValueError:
-            print("سرمایه باید عدد مثبت باشد.")
+    for interval in ["15m", "30m", "4h", "1d"]:
+        tf[interval] = analyze_timeframe(symbol, interval)
 
-    entry_text = input(
-        "قیمت ورود دلخواه (خالی = قیمت فعلی): "
-    ).strip()
-
-    print("\n[1/3] BTC...")
     btc = analyze_btc()
 
-    print(f"[2/3] {symbol}...")
-    analyses = {}
-    for tf in ["15m", "30m", "4h", "1d"]:
-        print(f"   -> {tf}")
-        analyses[tf] = analyze_tf(get_klines(symbol, tf, 300), tf)
+    score, decision = final_score(tf)
 
-    if entry_text:
-        entry = float(entry_text)
+    if entry is None:
+        entry = tf["15m"]["close"]
+
+    plan = make_trade_plan(
+        entry,
+        tf["4h"]["support"],
+        tf["4h"]["resistance"],
+        capital,
+        tf["4h"]["df"]["atr"].iloc[-1],
+    )
+
+    filename = REPORT_DIR / (
+        f"{symbol}_{int(time.time() * 1000)}.png"
+    )
+
+    make_chart(
+        symbol,
+        tf,
+        btc,
+        plan,
+        score,
+        decision,
+        capital,
+        str(filename),
+    )
+
+    return {
+        "symbol": symbol,
+        "capital": capital,
+        "entry": entry,
+        "tf": tf,
+        "btc": btc,
+        "score": score,
+        "decision": decision,
+        "plan": plan,
+        "image": filename,
+    }
+
+
+# ------------------------------------------------------------
+# TELEGRAM FORMATTING
+# ------------------------------------------------------------
+
+def decision_fa(decision):
+    return {
+        "STRONG BUY": "🟢 خرید قوی",
+        "BUY": "🟢 خرید",
+        "BUY ON CONFIRMATION": "🟡 خرید با تأیید",
+        "WAIT": "🟡 صبر",
+        "SELL / AVOID": "🔴 فروش / اجتناب",
+    }.get(decision, decision)
+
+
+def result_text(r):
+    p = r["plan"]
+    t = r["tf"]
+    btc = r["btc"]
+
+    return (
+        f"📊 <b>{r['symbol']} / USDT</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🎯 Score: <b>{r['score']:.0f}/100</b>\n"
+        f"📌 Decision: <b>{decision_fa(r['decision'])}</b>\n"
+        f"₿ BTC: <b>{btc['score']:.0f}/100</b> — {btc['state']}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⏱ <b>TIMEFRAMES</b>\n"
+        f"15m → {t['15m']['score']:.0f}/100 — {t['15m']['signal']}\n"
+        f"30m → {t['30m']['score']:.0f}/100 — {t['30m']['signal']}\n"
+        f"4H  → {t['4h']['score']:.0f}/100 — {t['4h']['signal']}\n"
+        f"1D  → {t['1d']['score']:.0f}/100 — {t['1d']['signal']}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 Capital: <b>${r['capital']:,.2f}</b>\n"
+        f"🟠 Entry: <b>{fmt_price(p['entry'])}</b>\n"
+        f"🔴 SL: <b>{fmt_price(p['stop'])}</b>\n"
+        f"🟢 TP1: <b>{fmt_price(p['tp1'])}</b>\n"
+        f"🟢 TP2: <b>{fmt_price(p['tp2'])}</b>\n"
+        f"🟢 TP3: <b>{fmt_price(p['tp3'])}</b>\n"
+        f"⚖️ R/R: <b>1:{p['rr']:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔴 SL P/L: ${p['sl_profit']:+,.2f} "
+        f"({p['sl_percent']:+.2f}%)\n"
+        f"🟢 TP1 P/L: ${p['tp1_profit']:+,.2f} "
+        f"({p['tp1_percent']:+.2f}%)\n"
+        f"🟢 TP2 P/L: ${p['tp2_profit']:+,.2f} "
+        f"({p['tp2_percent']:+.2f}%)\n"
+        f"🟢 TP3 P/L: ${p['tp3_profit']:+,.2f} "
+        f"({p['tp3_percent']:+.2f}%)\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🪙 Quantity: <b>{p['quantity']:,.2f}</b>\n\n"
+        f"⚠️ تحلیل است؛ سفارش خرید/فروش ارسال نمی‌شود."
+    )
+
+
+# ------------------------------------------------------------
+# TELEGRAM HANDLERS
+# ------------------------------------------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "🤖 به ربات تحلیل‌گر اسپات خوش آمدی.\n\n"
+        "برای شروع روی «🔍 تحلیل ارز» بزن.",
+        reply_markup=MAIN_MENU,
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ℹ️ راهنما\n\n"
+        "🔍 تحلیل ارز:\n"
+        "نام ارز + سرمایه + Entry را مرحله‌به‌مرحله می‌گیرد.\n\n"
+        "🔄 تحلیل مجدد:\n"
+        "همان ارز را با داده جدید تحلیل می‌کند.\n\n"
+        "💰 سود / ضرر:\n"
+        "P/L بر اساس سرمایه را نشان می‌دهد.\n\n"
+        "🎯 تغییر Entry:\n"
+        "Entry جدید می‌گیرد و محاسبه را به‌روز می‌کند.\n\n"
+        "🛑 SL / TP:\n"
+        "سطوح معامله را نشان می‌دهد.",
+        reply_markup=MAIN_MENU,
+    )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❌ لغو شد.",
+        reply_markup=MAIN_MENU,
+    )
+    return ConversationHandler.END
+
+
+async def analysis_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["trade"] = {
+        "symbol": None,
+        "capital": None,
+        "entry": None,
+        "result": None,
+    }
+
+    await update.message.reply_text(
+        "🔍 نام ارز را وارد کن.\n\n"
+        "مثال:\n"
+        "RESOLV\n\n"
+        "USDT لازم نیست.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    return COIN
+
+
+async def get_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        symbol = normalize_symbol(update.message.text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+        return COIN
+
+    context.user_data["trade"]["symbol"] = symbol
+
+    await update.message.reply_text(
+        f"✅ {symbol}\n\n"
+        "💰 سرمایه را به دلار وارد کن.\n"
+        "مثال: 3000"
+    )
+
+    return CAPITAL
+
+
+async def get_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        capital = float(update.message.text.replace(",", "").strip())
+        if capital <= 0:
+            raise ValueError
+    except Exception:
+        await update.message.reply_text(
+            "❌ سرمایه باید عدد مثبت باشد.\nمثال: 3000"
+        )
+        return CAPITAL
+
+    context.user_data["trade"]["capital"] = capital
+
+    await update.message.reply_text(
+        "🎯 Entry را وارد کن.\n\n"
+        "مثال:\n"
+        "0.01687\n\n"
+        "یا «📍 قیمت فعلی» را بزن.",
+        reply_markup=ENTRY_MENU,
+    )
+
+    return ENTRY
+
+
+async def get_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "❌ لغو":
+        await cancel(update, context)
+        return ConversationHandler.END
+
+    if text == "📍 قیمت فعلی":
+        entry = None
     else:
-        entry = analyses["15m"]["price"]
+        try:
+            entry = float(text.replace(",", ""))
+            if entry <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text(
+                "❌ Entry معتبر نیست.\nمثال: 0.01687"
+            )
+            return ENTRY
 
-    if entry <= 0:
-        raise ValueError("Entry must be > 0")
+    context.user_data["trade"]["entry"] = entry
 
-    score, decision = final_score(analyses, btc)
-
-    main = analyses["4h"]
-    plan = trade_plan(
-        main["df"], entry,
-        main["support"], main["resistance"],
-        capital
+    await update.message.reply_text(
+        "⏳ در حال تحلیل Binance...\n"
+        "15m + 30m + 4H + 1D + BTC\n"
+        "و ساخت تصویر نمودار...",
+        reply_markup=MAIN_MENU,
     )
 
-    print("\n[3/3] Generating image...")
-    image_path = generate_chart(
-        symbol, analyses, btc, plan,
-        score, decision, capital
+    await do_analysis(update, context)
+
+    return ConversationHandler.END
+
+
+async def do_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trade = context.user_data.get("trade")
+
+    if not trade or not trade.get("symbol"):
+        await update.message.reply_text(
+            "ابتدا «🔍 تحلیل ارز» را بزن.",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    symbol = trade["symbol"]
+    capital = trade["capital"]
+    entry = trade["entry"]
+
+    status = await update.message.reply_text(
+        "🔄 تحلیل در حال انجام است..."
     )
 
-    print_report(
-        symbol, capital, analyses, btc,
-        score, decision, plan, image_path
+    try:
+        result = await asyncio.to_thread(
+            run_analysis,
+            symbol,
+            capital,
+            entry,
+        )
+
+        trade["result"] = result
+
+        await status.edit_text(
+            result_text(result),
+            parse_mode="HTML",
+        )
+
+        with open(result["image"], "rb") as f:
+            await update.message.reply_photo(
+                photo=f,
+                caption=(
+                    f"📈 {symbol}/USDT — Automated Chart\n"
+                    f"Score: {result['score']:.0f}/100"
+                ),
+            )
+
+    except Exception as e:
+        await status.edit_text(
+            "❌ تحلیل انجام نشد.\n\n"
+            f"{e}\n\n"
+            "ممکن است نماد در Binance Spot وجود نداشته باشد."
+        )
+
+
+async def reanalyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("trade", {}).get("symbol"):
+        await update.message.reply_text(
+            "ابتدا «🔍 تحلیل ارز» را بزن.",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    await update.message.reply_text("🔄 تحلیل مجدد...")
+    await do_analysis(update, context)
+
+
+async def pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    r = context.user_data.get("trade", {}).get("result")
+
+    if not r:
+        await update.message.reply_text(
+            "هنوز تحلیلی انجام نشده.",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    p = r["plan"]
+
+    await update.message.reply_text(
+        f"💰 <b>{r['symbol']} — P/L</b>\n\n"
+        f"Capital: ${r['capital']:,.2f}\n\n"
+        f"🔴 SL: ${p['sl_profit']:+,.2f} ({p['sl_percent']:+.2f}%)\n"
+        f"🟢 TP1: ${p['tp1_profit']:+,.2f} ({p['tp1_percent']:+.2f}%)\n"
+        f"🟢 TP2: ${p['tp2_profit']:+,.2f} ({p['tp2_percent']:+.2f}%)\n"
+        f"🟢 TP3: ${p['tp3_profit']:+,.2f} ({p['tp3_percent']:+.2f}%)",
+        parse_mode="HTML",
+        reply_markup=MAIN_MENU,
     )
+
+
+async def levels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    r = context.user_data.get("trade", {}).get("result")
+
+    if not r:
+        await update.message.reply_text(
+            "ابتدا یک تحلیل انجام بده.",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    p = r["plan"]
+
+    await update.message.reply_text(
+        f"🎯 <b>{r['symbol']} — TRADE PLAN</b>\n\n"
+        f"🟠 Entry: {fmt_price(p['entry'])}\n"
+        f"🔴 SL: {fmt_price(p['stop'])}\n"
+        f"🟢 TP1: {fmt_price(p['tp1'])}\n"
+        f"🟢 TP2: {fmt_price(p['tp2'])}\n"
+        f"🟢 TP3: {fmt_price(p['tp3'])}\n\n"
+        f"⚖️ Risk/Reward: 1:{p['rr']:.2f}",
+        parse_mode="HTML",
+        reply_markup=MAIN_MENU,
+    )
+
+
+async def change_entry_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trade = context.user_data.get("trade")
+
+    if not trade or not trade.get("symbol"):
+        await update.message.reply_text(
+            "ابتدا یک تحلیل انجام بده.",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    context.user_data["changing_entry"] = True
+
+    await update.message.reply_text(
+        f"🎯 Entry جدید برای {trade['symbol']} را وارد کن.\n"
+        f"مثال: 0.01687\n\n"
+        f"یا «📍 قیمت فعلی» را بزن.",
+        reply_markup=ENTRY_MENU,
+    )
+
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    # Entry change mode
+    if context.user_data.get("changing_entry"):
+        if text == "❌ لغو":
+            context.user_data["changing_entry"] = False
+            await update.message.reply_text(
+                "لغو شد.",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        if text == "📍 قیمت فعلی":
+            entry = None
+        else:
+            try:
+                entry = float(text.replace(",", ""))
+                if entry <= 0:
+                    raise ValueError
+            except Exception:
+                await update.message.reply_text(
+                    "Entry معتبر نیست. مثال: 0.01687"
+                )
+                return
+
+        context.user_data["trade"]["entry"] = entry
+        context.user_data["changing_entry"] = False
+
+        await update.message.reply_text(
+            "🎯 Entry تغییر کرد. در حال تحلیل مجدد...",
+            reply_markup=MAIN_MENU,
+        )
+
+        await do_analysis(update, context)
+        return
+
+    await update.message.reply_text(
+        "از منوی ربات استفاده کن.",
+        reply_markup=MAIN_MENU,
+    )
+
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    conversation = ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(r"^🔍 تحلیل ارز$"),
+                analysis_start,
+            )
+        ],
+        states={
+            COIN: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    get_coin,
+                )
+            ],
+            CAPITAL: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    get_capital,
+                )
+            ],
+            ENTRY: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    get_entry,
+                )
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+        ],
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(conversation)
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🔄 تحلیل مجدد$"),
+            reanalyze,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^💰 سود / ضرر$"),
+            pnl,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🎯 تغییر Entry$"),
+            change_entry_start,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^🛑 SL / TP$"),
+            levels,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^ℹ️ راهنما$"),
+            help_cmd,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            text_router,
+        )
+    )
+
+    print("SPOT ANALYZER BOT IS RUNNING...")
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        print("Check symbol, internet connection, and Binance availability.")
+    main()
