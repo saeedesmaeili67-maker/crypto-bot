@@ -1,6 +1,7 @@
-ccxt
-pandas
-numpy
-mplfinance
-requests
-websocket-client
+python-telegram-bot==21.4
+ccxt==4.3.87
+pandas==2.2.2
+numpy==1.26.4
+matplotlib==3.9.1
+mplfinance==0.12.10b0
+scipy==1.13.1
