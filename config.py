@@ -28,3 +28,15 @@ VOLUME_MA_PERIOD = 20
 # پوشه موقت برای ذخیره چارت‌های تولید شده
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "charts")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ---- تنظیمات تشخیص نهنگ‌ها (Whale Detection) ----
+
+# آستانه دلاری برای علامت‌گذاری یک معامله به‌عنوان "معامله بزرگ" روی صرافی
+LARGE_TRADE_USD_THRESHOLD = float(os.environ.get("LARGE_TRADE_USD_THRESHOLD", "50000"))
+
+# کلید API سرویس Whale Alert (اختیاری - برای ردیابی تراکنش‌های بلاکچینی)
+# ثبت‌نام رایگان: https://whale-alert.io/
+WHALE_ALERT_API_KEY = os.environ.get("WHALE_ALERT_API_KEY", "")
+
+# حداقل ارزش دلاری تراکنش برای دریافت از Whale Alert
+WHALE_ALERT_MIN_USD = int(os.environ.get("WHALE_ALERT_MIN_USD", "500000"))

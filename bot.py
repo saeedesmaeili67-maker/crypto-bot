@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # ---- حالت‌های مکالمه ----
-ASK_COIN, ASK_CAPITAL, ASK_ENTRY, ASK_NEW_ENTRY = range(4)
+ASK_COIN, ASK_CAPITAL, ASK_RISK, ASK_ENTRY, ASK_NEW_ENTRY = range(5)
 
 MAIN_MENU_KB = ReplyKeyboardMarkup(
     [
@@ -114,6 +114,27 @@ async def ask_capital_received(update: Update, context: ContextTypes.DEFAULT_TYP
         return ASK_CAPITAL
 
     context.user_data["capital"] = capital
+    await update.message.reply_text(
+        "چند درصد از این سرمایه را حاضری در این معامله ریسک کنی؟\n"
+        "(مثال: 2 برای ۲٪ — یا بنویس «رد شو» اگر نمی‌خواهی محاسبه شود)"
+    )
+    return ASK_RISK
+
+
+async def ask_risk_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if "رد" in text or text.lower() in ("skip", "no", "-"):
+        context.user_data["risk_percent"] = None
+    else:
+        try:
+            risk = float(text.replace("%", "").replace("٪", "").replace(",", "."))
+            if risk <= 0 or risk > 100:
+                raise ValueError
+            context.user_data["risk_percent"] = risk
+        except ValueError:
+            await update.message.reply_text("لطفاً یک عدد معتبر بین ۰ تا ۱۰۰ وارد کن، یا «رد شو» بنویس:")
+            return ASK_RISK
+
     await update.message.reply_text("قیمت ورود مورد نظر (Entry) را وارد کنید (مثال: 0.01687):")
     return ASK_ENTRY
 
@@ -127,7 +148,8 @@ async def ask_entry_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     coin_input = context.user_data["coin_input"]
     capital = context.user_data["capital"]
-    await _run_analysis(update, context, coin_input, capital, entry)
+    risk_percent = context.user_data.get("risk_percent")
+    await _run_analysis(update, context, coin_input, capital, entry, risk_percent)
     return ConversationHandler.END
 
 
@@ -140,17 +162,18 @@ async def ask_new_entry_received(update: Update, context: ContextTypes.DEFAULT_T
 
     symbol = context.user_data["symbol"]
     capital = context.user_data["capital"]
-    await _run_analysis(update, context, symbol, capital, entry)
+    risk_percent = context.user_data.get("risk_percent")
+    await _run_analysis(update, context, symbol, capital, entry, risk_percent)
     return ConversationHandler.END
 
 
-async def _run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, coin_input: str, capital: float, entry: float):
+async def _run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, coin_input: str, capital: float, entry: float, risk_percent: float = None):
     progress = await update.message.reply_text("⏳ در حال دریافت داده‌ها و تحلیل بازار... لطفاً چند ثانیه صبر کنید")
 
     try:
         exchange = get_exchange()
         symbol = normalize_symbol(exchange, coin_input)
-        result = analyze_symbol(exchange, symbol, entry, capital)
+        result = analyze_symbol(exchange, symbol, entry, capital, risk_percent)
     except SymbolNotFoundError as e:
         await progress.edit_text(str(e))
         return
@@ -191,6 +214,7 @@ def main():
         states={
             ASK_COIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_coin_received)],
             ASK_CAPITAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_capital_received)],
+            ASK_RISK: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_risk_received)],
             ASK_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_entry_received)],
             ASK_NEW_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_new_entry_received)],
         },

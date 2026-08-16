@@ -5,3 +5,4 @@ numpy>=1.26.0
 matplotlib>=3.9.0
 mplfinance>=0.12.10b0
 scipy>=1.13.0
+requests>=2.31.0
