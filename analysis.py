@@ -121,15 +121,11 @@ def analyze_symbol(exchange, symbol: str, entry_price: float, capital: float, ri
     # سطح شکست = نزدیک‌ترین مقاومت بالای قیمت فعلی (یا بالای Entry)
     ref_price = max(current_price, entry_price)
     resistances_above = [r for r in result.resistance_levels if r > ref_price * 0.995]
-    result.breakout_level = min(resistances_above) if resistances_above else (
-        result.resistance_levels[0] if result.resistance_levels else ref_price * 1.03
-    )
+    result.breakout_level = min(resistances_above) if resistances_above else ref_price * 1.03
 
     # حمایت اصلی = نزدیک‌ترین حمایت زیر Entry
     supports_below = [s for s in result.support_levels if s < entry_price]
-    result.main_support = max(supports_below) if supports_below else (
-        result.support_levels[0] if result.support_levels else entry_price * 0.95
-    )
+    result.main_support = max(supports_below) if supports_below else entry_price * 0.95
 
     # حد ضرر: کمی پایین‌تر از حمایت اصلی (بافر ۲.۵٪ فاصله ساختاری)
     result.stop_loss = result.main_support * 0.985
