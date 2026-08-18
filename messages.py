@@ -13,10 +13,6 @@ def fmt_price(p: float) -> str:
 
 
 def build_summary_text(r: AnalysisResult) -> str:
-    coin_amount = r.coin_amount
-    risk_pct = (r.entry - r.stop_loss) / r.entry * 100
-    risk_usd = r.position_value * risk_pct / 100
-
     lines = []
     lines.append(f"📊 <b>{r.symbol} · 4H · BINANCE</b>")
     lines.append(f"🌍 جلسه معاملاتی: {r.trading_session}")
@@ -28,8 +24,16 @@ def build_summary_text(r: AnalysisResult) -> str:
     else:
         lines.append("💰 <b>اطلاعات معامله با سرمایه {:,.0f} دلار</b>".format(r.capital))
     lines.append(f"Entry (قیمت ورود): <code>{fmt_price(r.entry)}</code>")
-    lines.append(f"تعداد تقریبی: {coin_amount:,.2f} {r.symbol.split('/')[0]}")
+    lines.append(f"تعداد تقریبی: {r.coin_amount:,.2f} {r.symbol.split('/')[0]}")
     lines.append("")
+
+    # ---- هشدار وضعیت کلی، اگر هیچ سناریویی تایید نشده ----
+    if r.recommended_direction == "NONE":
+        lines.append(
+            "⚠️ <b>در حال حاضر هیچ سناریوی خرید یا فروشی توسط امتیاز تایم‌فریم‌ها تایید نمی‌شود. "
+            "سناریوهای زیر صرفاً جهت اطلاع‌رسانی‌اند، نه توصیه ورود.</b>"
+        )
+        lines.append("")
 
     # ---- الگوهای کندلی ----
     if r.patterns_at_support or r.patterns_at_resistance:
@@ -42,41 +46,92 @@ def build_summary_text(r: AnalysisResult) -> str:
             lines.append(f"{icon} {p['name_fa']} روی مقاومت — {p['description']}")
         lines.append("")
 
-    lines.append("🟢 <b>سناریوی خرید (صعودی)</b>")
+    # ============================================================
+    # سناریوی خرید — فقط وقتی recommended_direction == "BUY" به‌عنوان
+    # سناریوی فعال نشان داده می‌شود، در غیر این صورت به‌صورت غیرفعال/اطلاعاتی
+    # ============================================================
+    active_buy = r.recommended_direction == "BUY"
+    lines.append("🟢 <b>سناریوی خرید (صعودی)</b>" + (" — فعال ✅" if active_buy else " — غیرفعال"))
     lines.append(f"در صورت شکست قطعی بالای {fmt_price(r.breakout_level)} وارد شوید.")
     if r.fake_breakout_risk:
         lines.append("⚠️ شکست اخیر با حجم کافی تایید نشده — احتمال شکست کاذب.")
-    lines.append(f"تارگت ۱: {fmt_price(r.tp_levels[0])}")
-    if len(r.tp_levels) > 1:
-        lines.append(f"تارگت ۲: {fmt_price(r.tp_levels[1])}")
-    if len(r.tp_levels) > 2:
-        lines.append(f"تارگت ۳: {fmt_price(r.tp_levels[2])}")
+    if active_buy:
+        lines.append(f"تارگت ۱: {fmt_price(r.tp_levels[0])}")
+        if len(r.tp_levels) > 1:
+            lines.append(f"تارگت ۲: {fmt_price(r.tp_levels[1])}")
+        if len(r.tp_levels) > 2:
+            lines.append(f"تارگت ۳: {fmt_price(r.tp_levels[2])}")
+    else:
+        lines.append(f"تصمیم فعلی ({r.final_decision}) این سناریو را تایید نمی‌کند.")
     lines.append("")
 
-    lines.append("🔴 <b>سناریوی فروش (نزولی)</b>")
-    lines.append(f"در صورت عدم شکست {fmt_price(r.breakout_level)}، برگشت قیمت محتمل است.")
-    lines.append(f"در صورت افت زیر حمایت {fmt_price(r.main_support)} ضعف نشانه بازار است.")
-    lines.append(f"حد ضرر: {fmt_price(r.stop_loss)}")
+    # ============================================================
+    # سناریوی فروش — حالا اعداد واقعی و مستقل شورت است، نه کپی خرید
+    # ============================================================
+    active_sell = r.recommended_direction == "SELL"
+    lines.append("🔴 <b>سناریوی فروش (نزولی)</b>" + (" — فعال ✅" if active_sell else " — غیرفعال"))
+    lines.append(f"در صورت شکست قطعی زیر حمایت {fmt_price(r.breakdown_level)} احتمال ادامه افت وجود دارد.")
+    if active_sell:
+        lines.append(f"ورود شورت: {fmt_price(r.short_entry)}")
+        lines.append(f"تارگت ۱: {fmt_price(r.short_tp_levels[0])}")
+        if len(r.short_tp_levels) > 1:
+            lines.append(f"تارگت ۲: {fmt_price(r.short_tp_levels[1])}")
+        if len(r.short_tp_levels) > 2:
+            lines.append(f"تارگت ۳: {fmt_price(r.short_tp_levels[2])}")
+        lines.append(f"حد ضرر: {fmt_price(r.short_stop_loss)}")
+    else:
+        lines.append(f"تصمیم فعلی ({r.final_decision}) این سناریو را تایید نمی‌کند.")
     lines.append("")
 
+    # ============================================================
+    # پلن معامله — فقط برای سناریوی فعال محاسبه می‌شود
+    # ============================================================
     lines.append("📐 <b>پلن معامله (ریسک/ریوارد)</b>")
-    lines.append(f"ENTRY: <code>{fmt_price(r.entry)}</code>")
-    lines.append(f"STOP LOSS: <code>{fmt_price(r.stop_loss)}</code>")
-    for i, tp in enumerate(r.tp_levels, start=1):
-        lines.append(f"TP{i}: <code>{fmt_price(tp)}</code>")
-    if r.risk_reward:
-        lines.append(f"RISK / REWARD: 1 : {r.risk_reward:.2f}")
+    if active_buy:
+        lines.append(f"جهت: خرید (Long)")
+        lines.append(f"ENTRY: <code>{fmt_price(r.entry)}</code>")
+        lines.append(f"STOP LOSS: <code>{fmt_price(r.stop_loss)}</code>")
+        for i, tp in enumerate(r.tp_levels, start=1):
+            lines.append(f"TP{i}: <code>{fmt_price(tp)}</code>")
+        if r.risk_reward:
+            lines.append(f"RISK / REWARD: 1 : {r.risk_reward:.2f}")
+    elif active_sell:
+        lines.append(f"جهت: فروش (Short)")
+        lines.append(f"ENTRY: <code>{fmt_price(r.short_entry)}</code>")
+        lines.append(f"STOP LOSS: <code>{fmt_price(r.short_stop_loss)}</code>")
+        for i, tp in enumerate(r.short_tp_levels, start=1):
+            lines.append(f"TP{i}: <code>{fmt_price(tp)}</code>")
+        if r.short_risk_reward:
+            lines.append(f"RISK / REWARD: 1 : {r.short_risk_reward:.2f}")
+    else:
+        lines.append("هیچ سناریوی فعالی وجود ندارد — منتظر تایید تایم‌فریم‌ها بمانید.")
     lines.append("")
 
+    # ============================================================
+    # سود و ضرر احتمالی — فقط برای سناریوی فعال
+    # ============================================================
     lines.append("📋 <b>سود و ضرر احتمالی</b>")
-    lines.append(f"Stop Loss ({fmt_price(r.stop_loss)}): {-risk_pct:.2f}٪  (-{risk_usd:,.2f}$)")
-    for i, tp in enumerate(r.tp_levels, start=1):
-        pct = (tp - r.entry) / r.entry * 100
-        usd = r.position_value * pct / 100
-        lines.append(f"TP{i} ({fmt_price(tp)}): +{pct:.2f}٪  (+{usd:,.2f}$)")
+    if active_buy:
+        risk_pct = (r.entry - r.stop_loss) / r.entry * 100
+        risk_usd = r.position_value * risk_pct / 100
+        lines.append(f"Stop Loss ({fmt_price(r.stop_loss)}): {-risk_pct:.2f}٪  (-{risk_usd:,.2f}$)")
+        for i, tp in enumerate(r.tp_levels, start=1):
+            pct = (tp - r.entry) / r.entry * 100
+            usd = r.position_value * pct / 100
+            lines.append(f"TP{i} ({fmt_price(tp)}): +{pct:.2f}٪  (+{usd:,.2f}$)")
+    elif active_sell:
+        risk_pct = (r.short_stop_loss - r.short_entry) / r.short_entry * 100
+        risk_usd = r.position_value * risk_pct / 100
+        lines.append(f"Stop Loss ({fmt_price(r.short_stop_loss)}): {-risk_pct:.2f}٪  (-{risk_usd:,.2f}$)")
+        for i, tp in enumerate(r.short_tp_levels, start=1):
+            pct = (r.short_entry - tp) / r.short_entry * 100
+            usd = r.position_value * pct / 100
+            lines.append(f"TP{i} ({fmt_price(tp)}): +{pct:.2f}٪  (+{usd:,.2f}$)")
+    else:
+        lines.append("سناریوی فعالی برای محاسبه سود/ضرر وجود ندارد.")
     lines.append("")
 
-    # ---- اندیکاتورهای تکمیلی ----
+    # ---- اندیکاتورهای تکمیلی (بدون تغییر) ----
     lines.append("📈 <b>اندیکاتورهای تکمیلی</b>")
     if r.macd_cross == "bullish_cross":
         lines.append("MACD: تقاطع صعودی تازه رخ داده ✅")
@@ -116,7 +171,7 @@ def build_summary_text(r: AnalysisResult) -> str:
     if r.symbol != "BTC/USDT":
         lines.append(f"همبستگی با BTC: {r.btc_correlation}")
 
-    # ---- نهنگ‌ها ----
+    # ---- نهنگ‌ها (بدون تغییر) ----
     if r.whale_info and (r.whale_info.large_trades or r.whale_info.onchain_transfers):
         lines.append("")
         lines.append("🐋 <b>فعالیت نهنگ‌ها</b>")
@@ -133,7 +188,7 @@ def build_summary_text(r: AnalysisResult) -> str:
         if r.whale_info.onchain_transfers:
             lines.append(f"تراکنش‌های بلاکچینی بزرگ اخیر: {len(r.whale_info.onchain_transfers)} مورد")
 
-    # ---- ساختار بازار چند تایم‌فریمی ----
+    # ---- ساختار بازار چند تایم‌فریمی (بدون تغییر) ----
     if r.market_structure:
         lines.append("")
         lines.append("🏗️ <b>ساختار بازار (Market Structure)</b>")
@@ -153,7 +208,8 @@ def build_summary_text(r: AnalysisResult) -> str:
             lines.append(line)
 
         if r.structure_bias:
-            lines.append(f"<b>جمع‌بندی چند تایم‌فریمی: {r.structure_bias['bias_fa']}</b>")
+            bias_fa = r.structure_bias.get("bias_fa") if isinstance(r.structure_bias, dict) else r.structure_bias
+            lines.append(f"<b>جمع‌بندی چند تایم‌فریمی: {bias_fa}</b>")
 
         # ناحیه ورود/خروج پیشنهادی از تایم‌فریم 4 ساعته (تایم‌فریم اصلی معامله)
         main_struct = r.market_structure.get("4H")
