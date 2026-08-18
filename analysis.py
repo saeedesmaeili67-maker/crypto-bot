@@ -33,17 +33,32 @@ class AnalysisResult:
         self.low_idx = None
         self.up_trend = None   # (slope, intercept, x0, x1) خط روند صعودی از کف‌ها
         self.down_trend = None  # خط روند نزولی از سقف‌ها
+
+        # ---- سناریوی خرید (Long) ----
         self.entry = None
         self.stop_loss = None
         self.tp_levels = []
         self.breakout_level = None
         self.main_support = None
         self.risk_reward = None
+
+        # ---- سناریوی فروش (Short) — مستقل، دیگر کپی سناریوی خرید نیست ----
+        self.short_entry = None
+        self.short_stop_loss = None
+        self.short_tp_levels = []
+        self.breakdown_level = None
+        self.main_resistance = None
+        self.short_risk_reward = None
+
         self.capital = None
         self.coin_amount = None
         self.position_value = None
         self.timeframe_scores = {}
         self.final_decision = "WAIT"
+        # جهت پیشنهادی نهایی: "BUY" / "SELL" / "NONE"
+        # این فیلد مشخص می‌کند کدام سناریو باید در پیام به‌عنوان
+        # سناریوی فعال/توصیه‌شده نمایش داده شود
+        self.recommended_direction = "NONE"
         self.btc_scores = {}
         self.btc_state = "NEUTRAL"
         self.market_condition = ""
@@ -118,19 +133,18 @@ def analyze_symbol(exchange, symbol: str, entry_price: float, capital: float, ri
 
     current_price = df["close"].iloc[-1]
 
-    # سطح شکست = نزدیک‌ترین مقاومت بالای قیمت فعلی (یا بالای Entry)
+    # ============================================================
+    # سناریوی خرید (Long) — بدون تغییر نسبت به قبل
+    # ============================================================
     ref_price = max(current_price, entry_price)
     resistances_above = [r for r in result.resistance_levels if r > ref_price * 0.995]
     result.breakout_level = min(resistances_above) if resistances_above else ref_price * 1.03
 
-    # حمایت اصلی = نزدیک‌ترین حمایت زیر Entry
     supports_below = [s for s in result.support_levels if s < entry_price]
     result.main_support = max(supports_below) if supports_below else entry_price * 0.95
 
-    # حد ضرر: کمی پایین‌تر از حمایت اصلی (بافر ۲.۵٪ فاصله ساختاری)
     result.stop_loss = result.main_support * 0.985
 
-    # تارگت‌ها: سطح شکست + دو مقاومت بالاتر (یا پروجکشن بر اساس فاصله ریسک)
     risk = entry_price - result.stop_loss
     tp_candidates = sorted(set([r for r in result.resistance_levels if r > entry_price]))
     if not tp_candidates:
@@ -143,13 +157,43 @@ def analyze_symbol(exchange, symbol: str, entry_price: float, capital: float, ri
     if risk > 0:
         result.risk_reward = (result.tp_levels[0] - entry_price) / risk
 
-    # ---- محاسبه حجم پوزیشن ----
+    # ============================================================
+    # سناریوی فروش (Short) — جدید، مستقل و معکوس منطق خرید
+    # ============================================================
+    ref_price_low = min(current_price, entry_price)
+    supports_below_break = [s for s in result.support_levels if s < ref_price_low * 1.005]
+    result.breakdown_level = max(supports_below_break) if supports_below_break else ref_price_low * 0.97
+
+    resistances_above_entry = [r for r in result.resistance_levels if r > entry_price]
+    result.main_resistance = min(resistances_above_entry) if resistances_above_entry else entry_price * 1.05
+
+    result.short_entry = result.breakdown_level
+    result.short_stop_loss = result.main_resistance * 1.015
+
+    short_risk = result.short_stop_loss - result.short_entry
+    tp_candidates_short = sorted(
+        [s for s in result.support_levels if s < result.short_entry], reverse=True
+    )
+    if not tp_candidates_short:
+        tp_candidates_short = [
+            result.short_entry - short_risk * 2,
+            result.short_entry - short_risk * 4,
+            result.short_entry - short_risk * 7,
+        ]
+    while len(tp_candidates_short) < 3:
+        last = tp_candidates_short[-1] if tp_candidates_short else result.short_entry - short_risk * 2
+        tp_candidates_short.append(last * 0.9)
+    result.short_tp_levels = tp_candidates_short[:3]
+
+    if short_risk > 0:
+        result.short_risk_reward = (result.short_entry - result.short_tp_levels[0]) / short_risk
+
+    # ---- محاسبه حجم پوزیشن (بدون تغییر) ----
     if risk_percent and risk > 0:
-        # بر اساس درصد ریسک: مقدار سرمایه‌ای که حاضریم از دست بدهیم / فاصله ریسک به ازای هر واحد
         result.risk_amount_usd = capital * (risk_percent / 100)
         risk_per_unit_pct = risk / entry_price
         position_value = result.risk_amount_usd / risk_per_unit_pct if risk_per_unit_pct > 0 else capital
-        position_value = min(position_value, capital)  # نمی‌تواند از کل سرمایه بیشتر شود
+        position_value = min(position_value, capital)
         result.coin_amount = position_value / entry_price
         result.position_value = position_value
     else:
@@ -200,7 +244,38 @@ def analyze_symbol(exchange, symbol: str, entry_price: float, capital: float, ri
         result.market_structure = {}
         result.structure_bias = None
 
+    # ============================================================
+    # جهت پیشنهادی نهایی — messages.py از این فیلد استفاده می‌کند
+    # تا فقط سناریوی واقعاً هم‌جهت با تصمیم را نشان دهد
+    # ============================================================
+    result.recommended_direction = _determine_recommended_direction(
+        result.final_decision, result.structure_bias
+    )
+
     return result
+
+
+def _determine_recommended_direction(final_decision: str, structure_bias) -> str:
+    """
+    بر اساس final_decision و structure_bias مشخص می‌کند کدام سناریو
+    باید در پیام خروجی به‌عنوان سناریوی فعال/توصیه‌شده نمایش داده شود.
+    structure_bias می‌تواند رشته یا دیکشنری (با کلید 'bias_fa') باشد.
+    """
+    if isinstance(structure_bias, dict):
+        bias_text = structure_bias.get("bias_fa") or structure_bias.get("bias") or ""
+    else:
+        bias_text = structure_bias or ""
+    bias_text = str(bias_text).lower()
+
+    if "BUY" in final_decision:
+        return "BUY"
+
+    if "AVOID" in final_decision or final_decision == "WAIT":
+        if "نزول" in bias_text or "bear" in bias_text:
+            return "SELL"
+        return "NONE"
+
+    return "NONE"
 
 
 def _detect_macd_cross(macd_line: pd.Series, signal_line: pd.Series) -> str:
